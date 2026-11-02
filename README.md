@@ -1,3 +1,5 @@
+> This documentation is distributed with [Romlin’s parallel-ps2 fork](https://github.com/romlin-emu/parallel-ps2), derived from [libretro/parallel-ps2](https://github.com/libretro/parallel-ps2). Original project names, authors, and licenses are retained.
+
 # LRPS2
 
 PlayStation 2 emulation core for [libretro](https://www.libretro.com/) (RetroArch),
@@ -5,6 +7,12 @@ based on PCSX2. This fork's headline work is a native **AArch64 (arm64) port**:
 upstream PCSX2 emulation relies on x86-64 recompilers, which do not exist on ARM —
 this tree adds arm64 recompilers for the EE and IOP plus the supporting
 infrastructure to run correctly (and reasonably fast) on 64-bit ARM Linux devices.
+
+## Romlin libretro distribution
+
+This fork supplies the PCSX2-compatible `pcsx2_libretro` core to [Romlin](https://github.com/romlin-emu/romlin) on Windows and Linux x86_64. It retains the upstream ParaLLEl PS2, libretro, and PCSX2 authorship and licenses. Romlin’s patch loads texture packs from `<save directory>/textures/replacements/` automatically; the per-game save directory replaces the serial wrapper. Games without an installed pack retain the normal `<system>/pcsx2/textures/<serial>/replacements/` layout and settings.
+
+The [Romlin core release workflow](.github/workflows/romlin_release.yml) builds `pcsx2_libretro-windows-x86_64.zip` and `pcsx2_libretro-linux-x86_64.zip`, with SHA-256 checksum files, from the `romlin` branch. Run `python3 tests/libretro-textures/check.py` for the focused folder/configuration regression check. Full builds use the existing CMake project and vendored dependencies. No BIOS or game images are distributed.
 
 ## Status (arm64)
 

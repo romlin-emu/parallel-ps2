@@ -2529,6 +2529,25 @@ static void libretro_teardown_cpu_thread(void)
 	}
 }
 
+static void LoadGameTextureReplacements()
+{
+	const char* save_directory = nullptr;
+	if (!environ_cb(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY, &save_directory) || !save_directory || !*save_directory)
+		return;
+
+	char textures[PCSX2_PATH_MAX];
+	char replacements[PCSX2_PATH_MAX];
+	if (std::strlen(save_directory) + sizeof("/textures/replacements") > sizeof(replacements))
+		return;
+	pcsx2_path_join(textures, sizeof(textures), save_directory, "textures");
+	pcsx2_path_join(replacements, sizeof(replacements), textures, "replacements");
+	if (path_is_directory(replacements))
+	{
+		strlcpy(EmuFolders::Textures, textures, sizeof(EmuFolders::Textures));
+		s_option_config.GS.LoadTextureReplacements = true;
+	}
+}
+
 bool retro_load_game(const struct retro_game_info* game)
 {
 	VMBootParameters boot_params;
@@ -2692,6 +2711,7 @@ bool retro_load_game(const struct retro_game_info* game)
 		libretro_content.assign(name, ext ? (size_t)(ext - name) : strlen(name));
 	}
 
+	LoadGameTextureReplacements();
 	VMManager::ApplySettings();
 
 	image_index = 0;

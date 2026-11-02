@@ -1,0 +1,98 @@
+name: Romlin core release
+
+on:
+  push:
+    branches: [romlin]
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: romlin-core-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux
+            extension: so
+          - os: windows-2022
+            platform: windows
+            extension: dll
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test per-game texture loading
+        if: runner.os == 'Linux'
+        run: python3 tests/libretro-textures/check.py
+      - name: Configure
+        run: >-
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_POLICY_VERSION_MINIMUM=3.18 -DLIBRETRO=ON
+          -DDISABLE_ADVANCE_SIMD=ON -DUSE_VULKAN=ON -DUSE_OPENGL=ON
+      - name: Build
+        run: cmake --build build --config Release --parallel 3
+      - name: Package core and checksum
+        shell: bash
+        env:
+          CORE_PLATFORM: ${{ matrix.platform }}
+          CORE_EXTENSION: ${{ matrix.extension }}
+        run: |
+          python - <<'PYTHON'
+          import hashlib, os
+          from pathlib import Path
+          import zipfile
+          name = 'pcsx2_libretro.' + os.environ['CORE_EXTENSION']
+          matches = list(Path('build').rglob(name))
+          if len(matches) != 1:
+              raise SystemExit(f'Expected one {name}, found {matches}')
+          output = Path('dist')
+          output.mkdir()
+          asset = output / ('pcsx2_libretro-' + os.environ['CORE_PLATFORM'] + '-x86_64.zip')
+          with zipfile.ZipFile(asset, 'w', zipfile.ZIP_DEFLATED) as archive:
+              archive.write(matches[0], name)
+          digest = hashlib.sha256(asset.read_bytes()).hexdigest()
+          Path(str(asset) + '.sha256').write_text(digest + '  ' + asset.name + '\n')
+          PYTHON
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pcsx2-libretro-${{ matrix.platform }}-x86_64
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish source-matched core assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag="core-$(date -u +%Y%m%d)-${GITHUB_SHA::10}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "$tag is already published"
+            exit 0
+          fi
+          gh release create "$tag" dist/*.zip dist/*.sha256 \
+            --target "$GITHUB_SHA" \
+            --title "Romlin PCSX2 libretro cores, ${GITHUB_SHA::10}" \
+            --notes "Windows and Linux x86_64 cores built from ${GITHUB_SHA}, with Romlin per-game texture loading. Upstream ParaLLEl PS2, libretro, and PCSX2 credits and licenses are preserved in the source." \
+            --latest

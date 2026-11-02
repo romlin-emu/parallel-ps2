@@ -289,6 +289,10 @@ if (std::sscanf(filename.c_str(), TEXTURE_FILENAME_REGION_FORMAT_STRING "%c", &r
 
 std::string GSTextureReplacements::GetGameTextureDirectory()
 {
+	char replacements[PATH_MAX_LENGTH];
+	fill_pathname_join(replacements, EmuFolders::Textures, TEXTURE_REPLACEMENT_SUBDIRECTORY_NAME, sizeof(replacements));
+	if (path_is_directory(replacements))
+		return EmuFolders::Textures;
 	{
 		char path[PATH_MAX_LENGTH];
 		fill_pathname_join(path, EmuFolders::Textures, s_current_serial.c_str(), sizeof(path));
