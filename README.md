@@ -12,6 +12,8 @@ infrastructure to run correctly (and reasonably fast) on 64-bit ARM Linux device
 
 This fork supplies the PCSX2-compatible `pcsx2_libretro` core to [Romlin](https://github.com/romlin-emu/romlin) on Windows and Linux x86_64. It retains the upstream ParaLLEl PS2, libretro, and PCSX2 authorship and licenses. Romlin’s patch loads texture packs from `<save directory>/textures/replacements/` automatically; the per-game save directory replaces the serial wrapper. Games without an installed pack retain the normal `<system>/pcsx2/textures/<serial>/replacements/` layout and settings.
 
+Texture replacements require the Vulkan or OpenGL hardware renderer. Software and paraLLEl-GS do not apply replacement packs.
+
 The [Romlin core release workflow](.github/workflows/romlin_release.yml) builds `pcsx2_libretro-windows-x86_64.zip` and `pcsx2_libretro-linux-x86_64.zip`, with SHA-256 checksum files, from the `romlin` branch. Run `python3 tests/libretro-textures/check.py` for the focused folder/configuration regression check. Full builds use the existing CMake project and vendored dependencies. No BIOS or game images are distributed.
 
 ## Status (arm64)
