@@ -32,6 +32,11 @@
               "minimum": 0,
               "maximum": 3
             },
+            "eeDivRoundMode": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 3
+            },
             "vuRoundMode": {
               "type": "integer",
               "minimum": 0,
@@ -89,14 +94,12 @@
               "DMABusyHack",
               "EETimingHack",
               "FpuMulHack",
-              "FpuNegDivHack",
               "GIFFIFOHack",
               "GoemonTlbHack",
               "IbitHack",
               "InstantDMAHack",
               "OPHFlagHack",
               "SkipMPEGHack",
-              "SoftwareRendererFMVHack",
               "VIF1StallHack",
               "VIFFIFOHack",
               "VuAddSubHack",
@@ -116,11 +119,6 @@
               "type": "integer",
               "minimum": 0,
               "maximum": 2
-            },
-            "conservativeFramebuffer": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 1
             },
             "cpuFramebufferConversion": {
               "type": "integer",
@@ -147,11 +145,6 @@
               "minimum": 0,
               "maximum": 1
             },
-            "partialTargetInvalidation": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 1
-            },
             "textureInsideRT": {
               "type": "integer",
               "minimum": 0,
@@ -167,7 +160,7 @@
               "minimum": 0,
               "maximum": 1
             },
-            "wildArmsHack": {
+            "forceEvenSpritePosition": {
               "type": "integer",
               "minimum": 0,
               "maximum": 1
@@ -175,7 +168,7 @@
             "bilinearUpscale": {
               "type": "integer",
               "minimum": 0,
-              "maximum": 1
+              "maximum": 2
             },
             "nativePaletteDraw": {
               "type": "integer",
@@ -200,7 +193,7 @@
             "mipmap": {
               "type": "integer",
               "minimum": 0,
-              "maximum": 2
+              "maximum": 3
             },
             "trilinearFiltering": {
               "type": "integer",
@@ -225,9 +218,14 @@
             "halfPixelOffset": {
               "type": "integer",
               "minimum": 0,
-              "maximum": 3
+              "maximum": 4
             },
             "roundSprite": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2
+            },
+            "nativeScaling": {
               "type": "integer",
               "minimum": 0,
               "maximum": 2
@@ -235,7 +233,7 @@
             "texturePreloading": {
               "type": "integer",
               "minimum": 0,
-              "maximum": 1
+              "maximum": 2
             },
             "deinterlace": {
               "type": "integer",
@@ -255,11 +253,6 @@
             "cpuCLUTRender": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 2
-            },
-            "gpuTargetCLUT": {
-              "type": "integer",
-              "minimum": 0,
               "maximum": 2
             },
             "gpuPaletteConversion": {
@@ -287,6 +280,14 @@
             },
             "beforeDraw": {
               "type": "string"
+            },
+            "moveHandler": {
+              "type": "string"
+            },
+            "limit24BitDepth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2
             }
           },
           "additionalProperties": false
@@ -303,20 +304,25 @@
         "speedHacks": {
           "type": "object",
           "properties": {
-            "mvuFlagSpeedHack": {
+            "mvuFlag": {
               "type": "integer",
               "minimum": 0,
               "maximum": 1
             },
-            "InstantVU1SpeedHack": {
+            "instantVU1": {
               "type": "integer",
               "minimum": 0,
               "maximum": 1
             },
-            "MTVUSpeedHack": {
+            "mtvu": {
               "type": "integer",
               "minimum": 0,
               "maximum": 1
+            },
+            "eeCycleRate": {
+              "type": "integer",
+              "minimum": -3,
+              "maximum": 3
             }
           },
           "additionalProperties": false

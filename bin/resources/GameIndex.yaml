@@ -30200,7 +30200,7 @@ SLKA-25318:
   region: "NTSC-K"
   gsHWFixes:
     textureInsideRT: 1 # Fixes Hollywood Hulk Hogan's entrance and slow-mo finisher.
-  name: "Nickelodeon SpongeBob SquarePants - Lights, Camera, Pants!"
+SLKA-25319:
   name: "보글보글 스폰지밥 - 레디, 액션!"
   region: "NTSC-K"
   gsHWFixes:
