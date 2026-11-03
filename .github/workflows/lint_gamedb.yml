@@ -4,13 +4,22 @@ on:
   push:
     branches:
       - master
+      - romlin
     paths:
       - '**/GameIndex.yaml'
+      - 'pcsx2/Docs/gamedb-schema.json'
+      - '.github/workflows/lint_gamedb.yml'
   pull_request:
     branches:
       - master
+      - romlin
     paths:
       - '**/GameIndex.yaml'
+      - 'pcsx2/Docs/gamedb-schema.json'
+      - '.github/workflows/lint_gamedb.yml'
+
+permissions:
+  contents: read
 
 jobs:
   lint:
@@ -18,7 +27,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Validate Contents
         run: |

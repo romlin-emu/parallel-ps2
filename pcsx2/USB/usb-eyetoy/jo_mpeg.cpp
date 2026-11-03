@@ -59,12 +59,13 @@ static const unsigned char s_jo_ZigZag[] = { 0,1,5,6,14,15,27,28,2,4,7,13,16,26,
 
 typedef struct {
 	unsigned char *buf_ptr;
-	int buf, cnt;
+	unsigned buf;
+	int cnt;
 } jo_bits_t;
 
 static void jo_writeBits(jo_bits_t *b, int value, int count) {
 	b->cnt += count;
-	b->buf |= value << (24 - b->cnt);
+	b->buf |= (unsigned)value << (24 - b->cnt);
 	while(b->cnt >= 8) {
 		unsigned char c = (b->buf >> 16) & 255;
 		//putc(c, b->fp);

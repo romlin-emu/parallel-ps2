@@ -14,13 +14,29 @@ emulator against console captures and want a checkout to compare against:
 Without them those suites skip rather than fail, so the script is still
 worth running with neither set.
 
-`SANITIZER=undefined sh tests/run-all.sh` builds under UBSan, and
-everything that links emulator code is clean under it. Two suites ignore
-the variable on purpose: `faultstress` and `spsc` are concurrency tests
-and build with `-fsanitize=thread` unconditionally, since that is what
-they are for. `fpaudit` honours it but drops it for `jit_stage`, which
-emits and runs machine code of its own that ASan's shadow mapping does
-not survive.
+`SANITIZER=undefined sh tests/run-all.sh` builds sanitizer-aware suites
+under UBSan and makes diagnostics fatal. The runner exports both
+`SANITIZER` and `SANFLAGS`, since suites use both conventions. `fpaudit`
+drops ASan for `jit_stage`, which emits machine code of its own.
+
+CI calls `tests.yml` from `romlin_release.yml` for every PR and `romlin`
+push, so publication requires the plain, ASan and UBSan suites for the
+same commit as the packaged cores. The old `master`/`libretroization`
+pushes and manual suite runs remain available. `WORKSEMA_REPS=200` is
+unchanged. The fixed builds in `faultstress`, `spsc`, `mtvuring` and
+`pgscache`, plus the release-only `stackframe` check, run once in the plain
+lane. Internal sanitizer runs, iteration counts and stack limits remain
+intact; new suite directories are still discovered.
+This consolidation applies only to the GitHub Actions matrix. Local runs still
+execute every suite, including when `SANITIZER` is set.
+
+The native core builds enable `LRPS2_SMOKE_GATE`, exercising libretro
+initialization, BIOS-less load failure and teardown after linking. Linux
+also runs `secondload` and `swdraw` against the freshly built core with
+synthetic BIOS input. This does not verify real games or GPU rendering.
+Other built-core suites skip without `LRPS2_CORE`; hardware captures,
+GPU devices and optional cross toolchains are still reported as prerequisites.
+A successful harness build alone does not mean those runtime checks ran.
 
 Do a clean build between sanitizers with different define sets rather
 than reusing objects.

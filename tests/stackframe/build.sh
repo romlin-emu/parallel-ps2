@@ -19,8 +19,11 @@ WORK="$DIR/.work"
 rm -rf "$WORK" && mkdir -p "$WORK"
 trap 'rm -rf "$WORK"' EXIT
 
+"$MAKE" --no-print-directory -C "$ROOT" pcsx2/GameDatabaseBuiltin.cpp SANITIZER=
+
+# Measure release frames, without sanitizer instrumentation inflating them.
 # Each compile command, one script per source, its object sent to WORK.
-"$MAKE" --no-print-directory -s -n -B -C "$ROOT" > "$WORK/all.txt"
+"$MAKE" --no-print-directory -s -n -B -C "$ROOT" SANITIZER= > "$WORK/all.txt"
 n=0
 grep -E '^[^ ]+ -c -o[^ ]+ [^ ]+\.(c|cc|cpp) ' "$WORK/all.txt" \
 	| grep -v -E ' (3rdparty|pcsx2/GS/parallel-gs/Granite|pcsx2/GS/parallel-gs/gs)/' \

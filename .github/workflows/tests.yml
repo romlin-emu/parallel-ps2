@@ -1,48 +1,37 @@
 name: Tests
 
-# The suites under tests/ had no CI at all: sixteen of them, each with a
-# build.sh, and nothing ran any of them. They cover the interpreter and
-# recompiler against the PS2 hardware tests, the emitter, the settings
-# path, the CDVD readers, the MTVU ring and the fault handler -- which is
-# to say most of the places a change has broken this core before.
-
+# romlin pushes and all PRs call this from romlin_release.yml at the same commit.
 on:
+  workflow_call:
   push:
     branches: [master, libretroization]
-  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
-
 jobs:
   suites:
     name: ${{ matrix.name }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: plain
+            sanitizer: ''
             sanflags: ''
-          # Twelve of the sixteen build from SANFLAGS, so the sanitizers
-          # cost a rebuild rather than a separate harness. The other four
-          # -- faultstress, spsc, mtvuring, gs -- are the concurrency ones
-          # and run TSan themselves every time, which is the sanitizer
-          # that finds anything there; they simply repeat in these two
-          # rows.
           - name: asan
+            sanitizer: address
             sanflags: '-fsanitize=address -fno-omit-frame-pointer'
           - name: ubsan
+            sanitizer: undefined
             sanflags: '-fsanitize=undefined -fno-omit-frame-pointer'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           submodules: recursive
 
       - name: Install what the suites build against
@@ -50,10 +39,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential python3 liblzma-dev zlib1g-dev libgl-dev
 
+      - name: Check suite runner behavior
+        run: python3 tests/ci/check.py
+
       # run-all.sh finds every directory with a build.sh, so a suite added
       # later is covered here without touching this file.
       - name: Run the suites
         env:
+          SANITIZER: ${{ matrix.sanitizer }}
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
           SANFLAGS: ${{ matrix.sanflags }}
           # The concurrency suites are races: a single run of one proves
           # little. The WaitForEmpty failure that reached master showed up
@@ -67,19 +61,24 @@ jobs:
   # far less without them. A green tick above should not be read as those
   # having run, so this says which did what.
   report:
+    if: always()
     name: what ran
     needs: suites
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: List the suites and what each needs
         run: |
+          echo "Built-core suites skip without LRPS2_CORE; core release runs software smoke separately."
+          echo "GPU, aarch64 emulation and external hardware captures require their prerequisites."
           for d in tests/*/build.sh; do
             s=$(dirname "$d"); s=${s##*/}
             if grep -q 'PS2AUTOTESTS\|PS1TESTS' "$d"; then
               echo "$s: compares against the PS2/PS1 hardware test images; without"
               echo "    PS2AUTOTESTS or PS1TESTS set it checks only that it builds"
             else
-              echo "$s: self-contained"
+              echo "$s: see suite output for runtime prerequisites and skips"
             fi
           done

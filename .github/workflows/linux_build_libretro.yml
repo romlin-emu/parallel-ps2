@@ -7,23 +7,28 @@ on:
     branches: [libretroization]
   watch: # this is a hack that lets repo owners trigger a build by starring
     types: [started]
-    if: github.actor == github.event.repository.owner.login
+
+permissions:
+  contents: read
 
 jobs:
-  Windows:
+  build:
+    if: github.event_name != 'watch' || github.actor == github.event.repository.owner.login
     name: Build for Linux
     runs-on: ubuntu-latest
 
     steps:
     - name: Install needed packages
-      run: sudo apt install wget git build-essential liblzma-dev libgl-dev zlib1g-dev
+      run: sudo apt-get update && sudo apt-get install -y wget git build-essential liblzma-dev libgl-dev zlib1g-dev
     - name: Checkout Repository
-      uses: actions/checkout@v3
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
+        persist-credentials: false
         submodules: recursive
     - name: Build libretro core
       run: |
-        mkdir build && cd build && cmake .. && make -j8
+        cmake -S . -B build -DCMAKE_POLICY_VERSION_MINIMUM=3.18
+        cmake --build build --target pcsx2_libretro --parallel 3
 #        wget https://raw.githubusercontent.com/libretro/libretro-super/master/retrolink.sh && chmod +x retrolink.sh && ./retrolink.sh bin/pcsx2_libretro.so
 #        zip -9 pcsx2_libretro.so.zip bin/pcsx2_libretro.so
 #    - name: Create new release

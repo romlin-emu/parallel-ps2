@@ -10,9 +10,14 @@ permissions: {}
 
 concurrency:
   group: romlin-core-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  tests:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/tests.yml
+
   build:
     permissions:
       contents: read
@@ -28,10 +33,23 @@ jobs:
             extension: dll
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 500M
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Install Linux compiler cache
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ccache
+      - name: Cache Linux compilation
+        if: runner.os == 'Linux'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .ccache
+          key: core-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
+          restore-keys: core-${{ runner.os }}-${{ runner.arch }}-
       - name: Test per-game texture loading
         if: runner.os == 'Linux'
         run: python3 tests/libretro-textures/check.py
@@ -40,8 +58,18 @@ jobs:
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_POLICY_VERSION_MINIMUM=3.18 -DLIBRETRO=ON
           -DDISABLE_ADVANCE_SIMD=ON -DUSE_VULKAN=ON -DUSE_OPENGL=ON
+          -DLRPS2_SMOKE_GATE=ON
       - name: Build
         run: cmake --build build --config Release --parallel 3
+      - name: Built-core software smoke
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          LRPS2_CORE=$(realpath build/bin/pcsx2_libretro.so)
+          test -f "$LRPS2_CORE"
+          export LRPS2_CORE
+          sh tests/secondload/build.sh
+          sh tests/swdraw/build.sh
       - name: Package core and checksum
         shell: bash
         env:
@@ -71,8 +99,11 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: github.event_name != 'pull_request'
-    needs: build
+    if: >-
+      github.repository == 'romlin-emu/parallel-ps2' &&
+      github.ref == 'refs/heads/romlin' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: [tests, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
