@@ -7,12 +7,14 @@
 # object put it at offset eight and every comparison became a general
 # protection fault: an access violation whose address Windows reports as
 # -1, in PaletteKeyEqual, in every game at startup.
+# These test the pool itself, so they build it live even under a sanitizer
+# (GSObjectPool.h makes it hand out nothing there, for the cache's sake).
 set -e
 DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(CDPATH= cd -- "$DIR/../.." && pwd)
 LC="$ROOT/libretro/libretro-common"
 
-${CXX:-c++} -std=c++17 -O2 -g -w -msse2 $SANFLAGS \
+${CXX:-c++} -std=c++17 -O2 -g -w -msse2 -DGS_OBJECT_POOL_SANITIZED=0 $SANFLAGS \
 	-I "$ROOT/pcsx2/GS/Renderers/HW" -I "$LC/include" \
 	-o "$DIR/gsalign_test" \
 	"$DIR/main.cpp" "$ROOT/pcsx2/GS/Renderers/HW/GSObjectPool.c" "$LC/memmap/memalign.c"

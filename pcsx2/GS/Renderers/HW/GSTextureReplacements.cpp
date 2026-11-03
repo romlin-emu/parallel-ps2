@@ -287,17 +287,20 @@ if (std::sscanf(filename.c_str(), TEXTURE_FILENAME_REGION_FORMAT_STRING "%c", &r
 	return std::nullopt;
 }
 
+// A path buffer is PATH_MAX_LENGTH bytes. Returned as a string and never inlined,
+// so callers do not each carry one (or two) on their stack frames.
+static __noinline std::string JoinPath(const char* base, const char* next)
+{
+	char path[PATH_MAX_LENGTH];
+	fill_pathname_join(path, base, next, sizeof(path));
+	return path;
+}
+
 std::string GSTextureReplacements::GetGameTextureDirectory()
 {
-	char replacements[PATH_MAX_LENGTH];
-	fill_pathname_join(replacements, EmuFolders::Textures, TEXTURE_REPLACEMENT_SUBDIRECTORY_NAME, sizeof(replacements));
-	if (path_is_directory(replacements))
+	if (path_is_directory(JoinPath(EmuFolders::Textures, TEXTURE_REPLACEMENT_SUBDIRECTORY_NAME).c_str()))
 		return EmuFolders::Textures;
-	{
-		char path[PATH_MAX_LENGTH];
-		fill_pathname_join(path, EmuFolders::Textures, s_current_serial.c_str(), sizeof(path));
-		return path;
-	}
+	return JoinPath(EmuFolders::Textures, s_current_serial.c_str());
 }
 
 void GSTextureReplacements::Initialize()
@@ -339,11 +342,10 @@ void GSTextureReplacements::ReloadReplacementMap()
 	if (s_current_serial.empty() || !GSConfig.LoadTextureReplacements)
 		return;
 
-	char replacement_dir[PATH_MAX_LENGTH];
-	fill_pathname_join(replacement_dir, GetGameTextureDirectory().c_str(), TEXTURE_REPLACEMENT_SUBDIRECTORY_NAME, sizeof(replacement_dir));
+	const std::string replacement_dir = JoinPath(GetGameTextureDirectory().c_str(), TEXTURE_REPLACEMENT_SUBDIRECTORY_NAME);
 
 	FileSystem::FindResultsArray files;
-	if (!FileSystem::FindFiles(replacement_dir, "*", FILESYSTEM_FIND_FILES | FILESYSTEM_FIND_HIDDEN_FILES | FILESYSTEM_FIND_RECURSIVE, &files))
+	if (!FileSystem::FindFiles(replacement_dir.c_str(), "*", FILESYSTEM_FIND_FILES | FILESYSTEM_FIND_HIDDEN_FILES | FILESYSTEM_FIND_RECURSIVE, &files))
 		return;
 
 	std::string filename;

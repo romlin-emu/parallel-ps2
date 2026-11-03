@@ -31,12 +31,17 @@ extern "C" {
  * what the allocations these pools replaced asked for. */
 #define GS_OBJECT_POOL_ALIGN 64
 
-/* Built with an address sanitizer: the pool hands out nothing. */
+/* Built with an address sanitizer: the pool hands out nothing. Defined
+ * as 0 on the command line, the pool works under a sanitizer anyway,
+ * which is how the pool's own tests (tests/gspool, tests/gsalign) check
+ * its slots with the sanitizer watching the test. */
+#ifndef GS_OBJECT_POOL_SANITIZED
 #if defined(__SANITIZE_ADDRESS__)
 #define GS_OBJECT_POOL_SANITIZED 1
 #elif defined(__has_feature)
 #if __has_feature(address_sanitizer)
 #define GS_OBJECT_POOL_SANITIZED 1
+#endif
 #endif
 #endif
 #ifndef GS_OBJECT_POOL_SANITIZED

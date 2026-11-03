@@ -2535,13 +2535,14 @@ static void LoadGameTextureReplacements()
 	if (!environ_cb(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY, &save_directory) || !save_directory || !*save_directory)
 		return;
 
-	char textures[PCSX2_PATH_MAX];
-	char replacements[PCSX2_PATH_MAX];
-	if (std::strlen(save_directory) + sizeof("/textures/replacements") > sizeof(replacements))
+	if (std::strlen(save_directory) + sizeof("/textures/replacements") > PCSX2_PATH_MAX)
 		return;
+
+	/* One path buffer, not two: each is PCSX2_PATH_MAX bytes, and a second
+	 * one on the stack puts this function over the 4 KiB frame limit. */
+	char textures[PCSX2_PATH_MAX];
 	pcsx2_path_join(textures, sizeof(textures), save_directory, "textures");
-	pcsx2_path_join(replacements, sizeof(replacements), textures, "replacements");
-	if (path_is_directory(replacements))
+	if (path_is_directory((std::string(textures) + "/replacements").c_str()))
 	{
 		strlcpy(EmuFolders::Textures, textures, sizeof(EmuFolders::Textures));
 		s_option_config.GS.LoadTextureReplacements = true;

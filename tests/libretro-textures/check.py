@@ -25,6 +25,7 @@ def function(path, signature):
 
 configure = function("pcsx2-libretro/Main.cpp", "void Host::LoadSettings(") if ARMS else function("libretro/main.cpp", "static void LoadGameTextureReplacements()")
 selector = function("pcsx2/GS/Renderers/HW/GSTextureReplacements.cpp", "std::string GSTextureReplacements::GetGameTextureDirectory()")
+join_path = "" if ARMS else function("pcsx2/GS/Renderers/HW/GSTextureReplacements.cpp", "static __noinline std::string JoinPath(")
 prelude = r"""
 #include <cassert>
 #include <cstdio>
@@ -33,6 +34,7 @@ prelude = r"""
 #include <mutex>
 #include <string>
 #define ENABLE_LIBRETRO
+#define __noinline __attribute__((noinline))
 #define PCSX2_PATH_MAX 4096
 #define PATH_MAX_LENGTH 4096
 #define TEXTURE_REPLACEMENT_SUBDIRECTORY_NAME "replacements"
@@ -110,7 +112,7 @@ int main(int argc, char** argv) {
 with tempfile.TemporaryDirectory() as temp:
     temp = Path(temp)
     source = temp / "check.cpp"
-    source.write_text(prelude + configure + "\n" + selector + "\n" + main)
+    source.write_text(prelude + configure + "\n" + join_path + "\n" + selector + "\n" + main)
     binary = temp / "check"
     subprocess.run([os.environ.get("CXX", "c++"), "-std=c++17", "-Wall", "-Wextra", str(source), "-o", str(binary)], check=True)
     subprocess.run([str(binary), str(temp / "data")], check=True)
