@@ -824,4 +824,4 @@ public:
 	void InjectHashCacheTexture(const HashCacheKey& key, GSTexture* tex, const std::pair<u8, u8>& alpha_minmax);
 };
 
-extern std::unique_ptr<GSTextureCache> g_texture_cache;
+extern GSTextureCache* g_texture_cache;
