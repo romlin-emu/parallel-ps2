@@ -446,6 +446,48 @@ static std::optional<GameDatabaseSchema::GSHWFixId> GameDatabaseSchema::parseHWF
 	return std::nullopt;
 }
 
+/* GameIndex.yaml is kept in PCSX2's numbering, which is not this core's:
+ * here GSNativeScaling is Normal, Aggressive, Off. Translate at the one
+ * point the database is read, never by renumbering the core's enums, which
+ * the core options and saved settings also use.
+ *
+ * nativeScaling in the database: 0 Off, 1 Normal, 2 Aggressive,
+ * 3 Normal (Maintain Upscale), 4 Aggressive (Maintain Upscale). The core
+ * has no maintain-upscale sampling, so 3 and 4 take the mode they extend. */
+static bool translateNativeScaling(int value, GSNativeScaling* out)
+{
+	switch (value)
+	{
+		case 0:
+			*out = NativeScaling_Off;
+			return true;
+		case 1:
+		case 3:
+			*out = NativeScaling_Normal;
+			return true;
+		case 2:
+		case 4:
+			*out = NativeScaling_Aggressive;
+			return true;
+		default:
+			return false;
+	}
+}
+
+/* halfPixelOffset in the database follows this core's order up to 4 (Native).
+ * 5 is PCSX2's Align to Native with Texture Offset; it replaced 4 in entries
+ * that wanted extra texture offset, and the core has no such mode, so it
+ * takes Native. */
+static bool translateHalfPixelOffset(int value, GSHalfPixelOffset* out)
+{
+	if (value == 5)
+		value = static_cast<int>(GSHalfPixelOffset::Native);
+	if (value < 0 || value >= static_cast<int>(GSHalfPixelOffset::MaxCount))
+		return false;
+	*out = static_cast<GSHalfPixelOffset>(value);
+	return true;
+}
+
 bool GameDatabaseSchema::isUserHackHWFix(GSHWFixId id)
 {
 	switch (id)
@@ -671,13 +713,19 @@ bool GameDatabaseSchema::GameEntry::configMatchesHWFix(const Pcsx2Config::GSOpti
 			return (config.SkipDrawEnd == value);
 
 		case GSHWFixId::HalfPixelOffset:
-			return (config.UpscaleMultiplier <= 1.0f || config.UserHacks_HalfPixelOffset == static_cast<GSHalfPixelOffset>(value));
+		{
+			GSHalfPixelOffset mode;
+			return (translateHalfPixelOffset(value, &mode) && (config.UpscaleMultiplier <= 1.0f || config.UserHacks_HalfPixelOffset == mode));
+		}
 
 		case GSHWFixId::RoundSprite:
 			return (config.UpscaleMultiplier <= 1.0f || config.UserHacks_RoundSprite == value);
 
 		case GSHWFixId::NativeScaling:
-			return (static_cast<int>(config.UserHacks_NativeScaling) == value);
+		{
+			GSNativeScaling mode;
+			return (translateNativeScaling(value, &mode) && config.UserHacks_NativeScaling == mode);
+		}
 
 		case GSHWFixId::TexturePreloading:
 			return (static_cast<int>(config.TexturePreloading) <= value);
@@ -848,19 +896,29 @@ u32 GameDatabaseSchema::GameEntry::applyGSHardwareFixes(Pcsx2Config::GSOptions& 
 				break;
 
 			case GSHWFixId::HalfPixelOffset:
-				if (value >= 0 && value < static_cast<int>(GSHalfPixelOffset::MaxCount))
-					config.UserHacks_HalfPixelOffset = static_cast<GSHalfPixelOffset>(value);
-				break;
+			{
+				GSHalfPixelOffset mode;
+				if (translateHalfPixelOffset(value, &mode))
+					config.UserHacks_HalfPixelOffset = mode;
+				else
+					log_cb(RETRO_LOG_WARN, "[GameDB] Ignoring unknown halfPixelOffset mode %d.\n", value);
+			}
+			break;
 
 			case GSHWFixId::RoundSprite:
 				config.UserHacks_RoundSprite = value;
 				break;
 
 			case GSHWFixId::NativeScaling:
+			{
+				GSNativeScaling mode;
+				if (!translateNativeScaling(value, &mode))
+					log_cb(RETRO_LOG_WARN, "[GameDB] Ignoring unknown nativeScaling mode %d.\n", value);
 				/* The user's own setting of the option stands over the fix. */
-				if (!config.NativeScalingSet)
-					config.UserHacks_NativeScaling = static_cast<GSNativeScaling>(value);
-				break;
+				else if (!config.NativeScalingSet)
+					config.UserHacks_NativeScaling = mode;
+			}
+			break;
 
 			case GSHWFixId::TexturePreloading:
 			{

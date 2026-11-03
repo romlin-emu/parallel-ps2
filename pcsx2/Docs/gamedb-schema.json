@@ -218,7 +218,7 @@
             "halfPixelOffset": {
               "type": "integer",
               "minimum": 0,
-              "maximum": 4
+              "maximum": 5
             },
             "roundSprite": {
               "type": "integer",
@@ -228,7 +228,7 @@
             "nativeScaling": {
               "type": "integer",
               "minimum": 0,
-              "maximum": 2
+              "maximum": 4
             },
             "texturePreloading": {
               "type": "integer",
