@@ -317,7 +317,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "pcsx2_native_scaling",
       "Video > Native Scaling",
       "Native Scaling",
-      "Render the buffers a game draws at a fraction of its frame, such as a bloom or blur pass, at native resolution instead of the internal resolution. Keeps a blur's radius and position as on the console, at the cost of the resolution of the blurred picture; 'Aggressive' also applies to the draws that scale those buffers back up. 'Automatic' uses the game database's setting for the game, or 'Normal' where it has none. Any other value is used regardless of the database and of 'Enable HW Hacks'.",
+      "Render the buffers a game draws at a fraction of its frame, such as a bloom or blur pass, at native resolution instead of the internal resolution. Keeps a blur's radius and position as on the console, at the cost of the resolution of the blurred picture; 'Aggressive' also applies to the draws that scale those buffers back up. The 'Maintain Upscale' variants keep the internal resolution for a blend that scales a picture down, such as a bloom, reading the picture through a filter that simulates bilinear. 'Automatic' uses the game database's setting for the game, or 'Normal' where it has none. Any other value is used regardless of the database and of 'Enable HW Hacks'.",
       NULL,
       "video",
       {
@@ -325,6 +325,8 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { "disabled", NULL },
          { "Normal", NULL },
          { "Aggressive", NULL },
+         { "Normal (Maintain Upscale)", NULL },
+         { "Aggressive (Maintain Upscale)", NULL },
          { NULL, NULL },
       },
       "Automatic"
@@ -1095,6 +1097,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { "Special (Texture)", NULL },
          { "Special (Texture - Aggressive)", NULL },
          { "Align to Native", NULL },
+         { "Align to Native - with Texture Offset", NULL },
          { NULL, NULL },
       },
       "disabled"

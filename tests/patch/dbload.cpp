@@ -129,21 +129,22 @@ static void expect(bool ok, const char* what, int value)
 }
 
 /* The database's numbers are PCSX2's: nativeScaling 0 Off, 1 Normal,
- * 2 Aggressive, 3/4 the same two keeping the upscale; halfPixelOffset 0-4
- * as the core, 5 Native with texture offset. The core orders its own
- * GSNativeScaling Normal, Aggressive, Off, so a cast would swap Aggressive
- * for Off. Values outside the table must change nothing. */
+ * 2 Aggressive, 3/4 the same two keeping the upscale; halfPixelOffset 0-5
+ * as the core, 5 being Native with texture offset. Each value must map to
+ * exactly the mode it names. The core orders its own GSNativeScaling
+ * Normal, Aggressive, Off, so a cast would swap Aggressive for Off. Values
+ * outside the table must change nothing. */
 static void check_gs_mode_numbering(void)
 {
 	using GameDatabaseSchema::GSHWFixId;
 	static const struct { int value; GSNativeScaling mode; } kScaling[] = {
 		{0, NativeScaling_Off}, {1, NativeScaling_Normal}, {2, NativeScaling_Aggressive},
-		{3, NativeScaling_Normal}, {4, NativeScaling_Aggressive},
+		{3, NativeScaling_NormalUpscaled}, {4, NativeScaling_AggressiveUpscaled},
 	};
 	static const struct { int value; GSHalfPixelOffset mode; } kOffset[] = {
 		{0, GSHalfPixelOffset::Off}, {1, GSHalfPixelOffset::Normal},
 		{2, GSHalfPixelOffset::Special}, {3, GSHalfPixelOffset::SpecialAggressive},
-		{4, GSHalfPixelOffset::Native}, {5, GSHalfPixelOffset::Native},
+		{4, GSHalfPixelOffset::Native}, {5, GSHalfPixelOffset::NativeWTexOffset},
 	};
 	const Pcsx2Config::GSOptions defaults;
 	size_t i;
@@ -157,6 +158,16 @@ static void check_gs_mode_numbering(void)
 	{
 		Pcsx2Config::GSOptions gs = apply_fix(GSHWFixId::HalfPixelOffset, kOffset[i].value);
 		expect(gs.UserHacks_HalfPixelOffset == kOffset[i].mode, "halfPixelOffset", kOffset[i].value);
+	}
+
+	/* The two tables cover every mode: none is left without a database value
+	 * to name it (and none is named twice). */
+	expect(sizeof(kScaling) / sizeof(kScaling[0]) == (size_t)NativeScaling_MaxCount, "nativeScaling modes", (int)NativeScaling_MaxCount);
+	expect(sizeof(kOffset) / sizeof(kOffset[0]) == (size_t)GSHalfPixelOffset::MaxCount, "halfPixelOffset modes", (int)GSHalfPixelOffset::MaxCount);
+	for (i = 0; i < sizeof(kScaling) / sizeof(kScaling[0]); i++)
+	{
+		for (size_t j = i + 1; j < sizeof(kScaling) / sizeof(kScaling[0]); j++)
+			expect(kScaling[i].mode != kScaling[j].mode, "nativeScaling mode named twice", kScaling[j].value);
 	}
 
 	/* The user's own native scaling option stands over the database. */

@@ -446,14 +446,14 @@ static std::optional<GameDatabaseSchema::GSHWFixId> GameDatabaseSchema::parseHWF
 	return std::nullopt;
 }
 
-/* GameIndex.yaml is kept in PCSX2's numbering, which is not this core's:
- * here GSNativeScaling is Normal, Aggressive, Off. Translate at the one
- * point the database is read, never by renumbering the core's enums, which
- * the core options and saved settings also use.
+/* GameIndex.yaml is kept in PCSX2's numbering, which is not this core's for
+ * nativeScaling: here GSNativeScaling is Normal, Aggressive, Off, then the two
+ * Maintain Upscale modes. Translate at the one point the database is read,
+ * never by renumbering the core's enums, which the core options and saved
+ * settings also use.
  *
  * nativeScaling in the database: 0 Off, 1 Normal, 2 Aggressive,
- * 3 Normal (Maintain Upscale), 4 Aggressive (Maintain Upscale). The core
- * has no maintain-upscale sampling, so 3 and 4 take the mode they extend. */
+ * 3 Normal (Maintain Upscale), 4 Aggressive (Maintain Upscale). */
 static bool translateNativeScaling(int value, GSNativeScaling* out)
 {
 	switch (value)
@@ -462,26 +462,27 @@ static bool translateNativeScaling(int value, GSNativeScaling* out)
 			*out = NativeScaling_Off;
 			return true;
 		case 1:
-		case 3:
 			*out = NativeScaling_Normal;
 			return true;
 		case 2:
-		case 4:
 			*out = NativeScaling_Aggressive;
+			return true;
+		case 3:
+			*out = NativeScaling_NormalUpscaled;
+			return true;
+		case 4:
+			*out = NativeScaling_AggressiveUpscaled;
 			return true;
 		default:
 			return false;
 	}
 }
 
-/* halfPixelOffset in the database follows this core's order up to 4 (Native).
- * 5 is PCSX2's Align to Native with Texture Offset; it replaced 4 in entries
- * that wanted extra texture offset, and the core has no such mode, so it
- * takes Native. */
+/* halfPixelOffset in the database is this core's GSHalfPixelOffset: 0 Off,
+ * 1 Normal (Vertex), 2 Special (Texture), 3 Special (Texture - Aggressive),
+ * 4 Align to Native, 5 Align to Native - with Texture Offset. */
 static bool translateHalfPixelOffset(int value, GSHalfPixelOffset* out)
 {
-	if (value == 5)
-		value = static_cast<int>(GSHalfPixelOffset::Native);
 	if (value < 0 || value >= static_cast<int>(GSHalfPixelOffset::MaxCount))
 		return false;
 	*out = static_cast<GSHalfPixelOffset>(value);

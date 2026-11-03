@@ -980,8 +980,52 @@ bool GSRendererHW::IsSampleMapDraw(const GSTextureCache::Source* tex)
 	return true;
 }
 
+/* Whether the half-pixel offset moves the draw half a native pixel, so the
+ * draw's native pixel grid starts that far in (see SetupIA's offset and the
+ * shader's NativeOffset). Aligned to native it always does, except a
+ * snapped sprite, whose edges are already where the GS puts them. With the
+ * texture offset it does so only for a read of a native-size target, which
+ * has no samples to offset; a scaled source takes the texture offset
+ * (RealignTargetTextureCoordinate) and the half fragment of the draw's
+ * unmoved position instead, and a channel shuffle moves by neither. */
+bool GSRendererHW::MovesDrawHalfNativePixel(const GSTextureCache::Source* tex) const
+{
+	switch (GSConfig.UserHacks_HalfPixelOffset)
+	{
+		case GSHalfPixelOffset::Native:
+			return !m_sprite_edges_snapped;
+		case GSHalfPixelOffset::NativeWTexOffset:
+			return !m_sprite_edges_snapped && !m_channel_shuffle && tex && tex->m_from_target && tex->m_scale <= 1.0f;
+		default:
+			return false;
+	}
+}
+
 GSVector4 GSRendererHW::RealignTargetTextureCoordinate(const GSTextureCache::Source* tex)
 {
+	if (GSConfig.UserHacks_HalfPixelOffset == GSHalfPixelOffset::NativeWTexOffset)
+	{
+		/* The offset of the coordinates stands in for the half native pixel
+		 * move of the draw, for a source drawn at scale. Not for a snapped
+		 * sprite (its coordinates are exact, and carried as ST), a sample
+		 * map draw (it picks texels by native pixel) or a source read
+		 * downscaled. */
+		if (m_downscale_source || tex->GetScale() <= 1.0f || m_sprite_edges_snapped || IsSampleMapDraw(tex))
+			return GSVector4(0.0f);
+
+		if (PRIM->FST)
+		{
+			const float offset = 6.0f + (0.25f * tex->GetScale());
+			return GSVector4(offset, offset, 0.0f, 0.0f);
+		}
+
+		const GSVertex* v = &m_vertex.buff[0];
+		const float tw = static_cast<float>(1 << m_cached_ctx.TEX0.TW);
+		const float th = static_cast<float>(1 << m_cached_ctx.TEX0.TH);
+		const float q = v[0].RGBAQ.Q;
+		return GSVector4(0.5f * q / tw, 0.5f * q / th, 0.0f, 0.0f);
+	}
+
 	if (	   GSConfig.UserHacks_HalfPixelOffset <= 1 
 		|| GSConfig.UserHacks_HalfPixelOffset >= 4
 		|| GetUpscaleMultiplier() == 1.0f
@@ -3532,11 +3576,22 @@ void GSRendererHW::Draw()
 		// 2 == Upscale, so likely putting it over the top of the render target.
 		if (scale_draw == 1)
 		{
-			target_scale = 1.0f;
 			m_downscale_source = src->m_from_target->GetScale() > 1.0f;
+
+			/* The Maintain Upscale modes keep the target of a blend that scales a
+			 * picture down at its scale, reading the source downscaled. Not when
+			 * it only picks out the highlights for a bloom (alpha tested, or a
+			 * blend of the source's alpha alone), is a draw rather than a blend,
+			 * or recurses over the source (Tomb Raider downsamples in place). */
+			const bool highlights_only = m_cached_ctx.TEST.ATE || (PRIM->ABE && m_context->ALPHA.C == 2 && m_context->ALPHA.FIX == 255);
+			if (!GSNativeScalingMaintainsUpscale(GSConfig.UserHacks_NativeScaling) || highlights_only || !PRIM->ABE ||
+				src->m_from_target->Overlaps(m_cached_ctx.FRAME.Block(), m_cached_ctx.FRAME.FBW, m_cached_ctx.FRAME.PSM, m_r))
+			{
+				target_scale = 1.0f;
+			}
 		}
 		else
-			m_downscale_source = GSConfig.UserHacks_NativeScaling != GSNativeScaling::NativeScaling_Aggressive ? false : src->m_from_target->GetScale() > 1.0f; // Bad for GTA + Full Spectrum Warrior, good for Sacred Blaze + Parappa.
+			m_downscale_source = (GSConfig.UserHacks_NativeScaling != GSNativeScaling::NativeScaling_Aggressive && GSConfig.UserHacks_NativeScaling != GSNativeScaling::NativeScaling_AggressiveUpscaled) ? false : src->m_from_target->GetScale() > 1.0f; // Bad for GTA + Full Spectrum Warrior, good for Sacred Blaze + Parappa.
 	}
 	else
 	{
@@ -3595,7 +3650,7 @@ void GSRendererHW::Draw()
 		// Of course if this size is different (in width) or this is a shuffle happening, this will be bypassed.
 		const bool preserve_downscale_draw = std::abs(scale_draw) == 1 || (scale_draw == 0 && ((src && src->m_from_target && src->m_from_target->m_downscaled) || is_possible_mem_clear == ClearType::ClearWithDraw));
 
-		rt = g_texture_cache->LookupTarget(FRAME_TEX0, t_size, ((src && src->m_scale != 1) && GSConfig.UserHacks_NativeScaling == GSNativeScaling::NativeScaling_Normal && !possible_shuffle) ? GetTextureScaleFactor() : target_scale, GSTextureCache::RenderTarget, true,
+		rt = g_texture_cache->LookupTarget(FRAME_TEX0, t_size, ((src && src->m_scale != 1) && (GSConfig.UserHacks_NativeScaling == GSNativeScaling::NativeScaling_Normal || GSConfig.UserHacks_NativeScaling == GSNativeScaling::NativeScaling_NormalUpscaled) && !possible_shuffle) ? GetTextureScaleFactor() : target_scale, GSTextureCache::RenderTarget, true,
 			fm, false, force_preload, preserve_rt_rgb, preserve_rt_alpha, unclamped_draw_rect, possible_shuffle, is_possible_mem_clear && FRAME_TEX0.TBP0 != m_cached_ctx.ZBUF.Block(), GSConfig.UserHacks_NativeScaling != GSNativeScaling::NativeScaling_Off && preserve_downscale_draw && is_possible_mem_clear != ClearType::NormalClear);
 		if (rt)
 			g_texture_cache->SeedSubTargetFromEnclosing(rt);
@@ -5764,7 +5819,7 @@ __ri void GSRendererHW::EmulateTextureSampler(const GSTextureCache::Target* rt, 
 	 * offset), and a sample chosen by native pixel takes that grid; a
 	 * snapped sprite is drawn on the fragment grid's own. */
 	m_conf.cb_ps.ScaleFactor = GSVector4(scale_factor * (1.0f / 16.0f), 1.0f / scale_factor, scale_rt,
-		(GSConfig.UserHacks_HalfPixelOffset == GSHalfPixelOffset::Native && !m_sprite_edges_snapped) ? 0.5f * scale_rt : 0.0f);
+		MovesDrawHalfNativePixel(tex) ? 0.5f * scale_rt : 0.0f);
 
 	if ((m_conf.ps.tex_is_fb && rt->m_rt_alpha_scale) || (tex->m_target && tex->m_from_target && tex->m_target_direct && tex->m_from_target->m_rt_alpha_scale))
 		m_conf.ps.rta_source_correction = 1;
@@ -6261,10 +6316,10 @@ __ri void GSRendererHW::HandleTextureHazards(const GSTextureCache::Target* rt, c
 
 	if (m_downscale_source)
 	{
-		// Can't use box filtering on depth (yet), or fractional scales.
-#if 0
-		if (src_target->m_texture->IsDepthStencil() || std::floor(src_target->GetScale()) != src_target->GetScale())
-#endif
+		// Can't use box filtering on depth (yet), or fractional scales. It is not hooked up
+		// (it is slower) except for the Maintain Upscale modes, whose sampling it exists for.
+		if (!GSNativeScalingMaintainsUpscale(GSConfig.UserHacks_NativeScaling) || src_target->m_texture->IsDepthStencil() ||
+			std::floor(src_target->GetScale()) != src_target->GetScale())
 		{
 			const GSVector4 dst_rect = GSVector4(GSVector4i::loadh(src_unscaled_size));
 			g_gs_device->StretchRect(src_target->m_texture,
@@ -6272,7 +6327,6 @@ __ri void GSRendererHW::HandleTextureHazards(const GSTextureCache::Target* rt, c
 			dst_rect, src_target->m_texture->IsDepthStencil() 
 			? ShaderConvert::DEPTH_COPY : ShaderConvert::COPY, false);
 		}
-#if 0
 		else
 		{
 			// When using native HPO, the top-left column/row of pixels are often not drawn. Clamp these away to avoid sampling black,
@@ -6285,7 +6339,6 @@ __ri void GSRendererHW::HandleTextureHazards(const GSTextureCache::Target* rt, c
 			const GSVector4 dRect = GSVector4((copy_rect + GSVector4i(-1, 1).xxyy()).rintersect(src_target->GetUnscaledRect()));
 			g_gs_device->FilteredDownsampleTexture(src_target->m_texture, src_copy.get(), downsample_factor, clamp_min, dRect);
 		}
-#endif
 	}
 	else
 	{
@@ -6977,8 +7030,14 @@ __ri void GSRendererHW::DrawPrims(GSTextureCache::Target* rt, GSTextureCache::Ta
 	 * target the game reads back at its own width (a blend, a corona, a
 	 * blur over the picture), or to depth alone, by the same half pixel.
 	 * A snapped sprite already covers the native pixels the GS covers,
-	 * with its coordinates at their positions, and moves by neither. */
-	if ((GSConfig.UserHacks_HalfPixelOffset != GSHalfPixelOffset::Native || m_sprite_edges_snapped) && rtscale > 1.0f)
+	 * with its coordinates at their positions, and moves by neither.
+	 * Aligned to native with the texture offset, the draw moves the half
+	 * native pixel only to read a native-size target (and not in a channel
+	 * shuffle); for a scaled source the offset of its coordinates does the
+	 * aligning (RealignTargetTextureCoordinate), and the draw moves the
+	 * half fragment it does unaligned. */
+	if ((GSConfig.UserHacks_HalfPixelOffset < GSHalfPixelOffset::Native || m_sprite_edges_snapped ||
+			(GSConfig.UserHacks_HalfPixelOffset == GSHalfPixelOffset::NativeWTexOffset && m_channel_shuffle)) && rtscale > 1.0f)
 	{
 		sx = 2.0f * rtscale / (rtsize.x << 4);
 		sy = 2.0f * rtscale / (rtsize.y << 4);
@@ -6996,8 +7055,18 @@ __ri void GSRendererHW::DrawPrims(GSTextureCache::Target* rt, GSTextureCache::Ta
 		const int unscaled_y = rt_or_ds ? rt_or_ds->GetUnscaledHeight() : 0;
 		sx = 2.0f / (unscaled_x << 4);
 		sy = 2.0f / (unscaled_y << 4);
-		ox2 = -1.0f / unscaled_x;
-		oy2 = -1.0f / unscaled_y;
+		if (GSConfig.UserHacks_HalfPixelOffset == GSHalfPixelOffset::NativeWTexOffset && !MovesDrawHalfNativePixel(tex))
+		{
+			/* The source's texture offset does the aligning: the draw moves
+			 * half a fragment, as it does unaligned. */
+			ox2 = -1.0f / (unscaled_x * rtscale);
+			oy2 = -1.0f / (unscaled_y * rtscale);
+		}
+		else
+		{
+			ox2 = -1.0f / unscaled_x;
+			oy2 = -1.0f / unscaled_y;
+		}
 	}
 
 	m_conf.cb_vs.vertex_scale = GSVector2(sx, sy);
@@ -8156,7 +8225,10 @@ int GSRendererHW::IsScalingDraw(GSTextureCache::Source* src, bool no_gaps)
 	if (tex_size.x == 0 || tex_size.y == 0 || draw_size.x == 0 || draw_size.y == 0 || !is_target_src)
 		return 0;
 
-	if (is_target_src && src->m_from_target->m_downscaled && abs(draw_size.x - tex_size.x) <= 1 && abs(draw_size.y - tex_size.y) <= 1)
+	/* Maintaining the upscale, a target kept at its scale is as good a source
+	 * to copy at its size as one drawn downscaled. */
+	if (is_target_src && (src->m_from_target->m_downscaled || GSNativeScalingMaintainsUpscale(GSConfig.UserHacks_NativeScaling)) &&
+		abs(draw_size.x - tex_size.x) <= 1 && abs(draw_size.y - tex_size.y) <= 1)
 		return -1;
 
 	const GSDrawingContext& next_ctx = m_env.CTXT[m_env.PRIM.CTXT];
@@ -8170,7 +8242,7 @@ int GSRendererHW::IsScalingDraw(GSTextureCache::Source* src, bool no_gaps)
 	// Check we're getting most of the texture and not just stenciling a part of it.
 	// Only allow non-bilineared downscales if it's most of the target (misdetections of shadows in Naruto, Transformers etc), otherwise it's fine.
 	const GSVector2i tex_size_half = GSVector2i((src->GetRegion().HasX() ? src->GetRegionSize().x : src->m_from_target->m_valid.width()) / 2, (src->GetRegion().HasY() ? src->GetRegionSize().y : src->m_from_target->m_valid.height()) / 2);
-	const bool possible_downscale = m_context->TEX1.MMAG == 1 || src->m_from_target->m_downscaled || tex_size.x >= tex_size_half.x || tex_size.y >= tex_size_half.y;
+	const bool possible_downscale = m_context->TEX1.MMAG == 1 || src->m_from_target->m_downscaled || GSNativeScalingMaintainsUpscale(GSConfig.UserHacks_NativeScaling) || tex_size.x >= tex_size_half.x || tex_size.y >= tex_size_half.y;
 
 	if (is_downscale && (draw_size.x >= PCRTCDisplays.GetResolution().x || !possible_downscale))
 		return 0;
