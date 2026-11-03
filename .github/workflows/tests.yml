@@ -1,10 +1,10 @@
 name: Tests
 
 # romlin pushes and all PRs call this from romlin_release.yml at the same commit.
+# Each sanitizer lane is split into shards that run in parallel; see
+# tests/run-all.sh for how suites are assigned.
 on:
   workflow_call:
-  push:
-    branches: [master, libretroization]
   workflow_dispatch:
 
 permissions:
@@ -12,12 +12,18 @@ permissions:
 
 jobs:
   suites:
-    name: ${{ matrix.name }}
+    name: ${{ matrix.name }} (shard ${{ matrix.shard }} of 5)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
+        # Five shards of each lane; keep `shard` and SHARDS below in step.
+        # tests/run-all.sh spreads the suites by weight, and its heaviest
+        # (smaprx, pgs, spsc) already sit in different shards, so more
+        # shards would barely shorten the longest job.
+        name: [plain, asan, ubsan]
+        shard: [0, 1, 2, 3, 4]
         include:
           - name: plain
             sanitizer: ''
@@ -55,6 +61,8 @@ jobs:
           # multi-core host and not at all on a quiet single-core one, so
           # the pair runs many times here rather than once.
           WORKSEMA_REPS: 200
+          SHARD: ${{ matrix.shard }}
+          SHARDS: 5
         run: sh tests/run-all.sh
 
   # The hardware-test suites compare against the PS2 test images and check
@@ -65,14 +73,17 @@ jobs:
     name: what ran
     needs: suites
     runs-on: ubuntu-latest
+    env:
+      SUITES_RESULT: ${{ needs.suites.result }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: List the suites and what each needs
         run: |
+          echo "Each lane (plain, asan, ubsan) ran as 5 shards; shard job result: $SUITES_RESULT"
           echo "Built-core suites skip without LRPS2_CORE; core release runs software smoke separately."
-          echo "GPU, aarch64 emulation and external hardware captures require their prerequisites."
+          echo "GPU devices and external hardware captures require their prerequisites."
           for d in tests/*/build.sh; do
             s=$(dirname "$d"); s=${s##*/}
             if grep -q 'PS2AUTOTESTS\|PS1TESTS' "$d"; then

@@ -3,7 +3,6 @@ name: 📝 Validate GameDB
 on:
   push:
     branches:
-      - master
       - romlin
     paths:
       - '**/GameIndex.yaml'
@@ -11,7 +10,6 @@ on:
       - '.github/workflows/lint_gamedb.yml'
   pull_request:
     branches:
-      - master
       - romlin
     paths:
       - '**/GameIndex.yaml'
@@ -33,10 +31,10 @@ jobs:
 
       - name: Validate Contents
         run: |
-          npm install -g ajv-cli
+          npm install -g ajv-cli@5.0.0
           ajv validate -s ./pcsx2/Docs/gamedb-schema.json --spec=draft2020 -d ./bin/resources/GameIndex.yaml
 
       - name: Check Formatting
         run: |
-          npm install -g prettier
+          npm install -g prettier@3.9.10
           prettier --check ./bin/resources/GameIndex.yaml

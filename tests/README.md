@@ -19,16 +19,25 @@ under UBSan and makes diagnostics fatal. The runner exports both
 `SANITIZER` and `SANFLAGS`, since suites use both conventions. `fpaudit`
 drops ASan for `jit_stage`, which emits machine code of its own.
 
+Set `SHARD=i SHARDS=n` to run only the i-th (from 0) of n disjoint subsets
+of the suites. Suites are assigned greedily by an approximate runtime
+(`suite_weight` in `run-all.sh`), so the heaviest ones land in different
+shards. The split depends only on the suite list, so the shards together run
+each suite exactly once; a suite missing from the weight table is still
+found and run, just less evenly balanced. `LIST=1` prints a shard's suites
+without running them. With neither variable set, every suite runs, so local
+runs are unchanged. `python3 tests/ci/check.py` covers the split.
+
 CI calls `tests.yml` from `romlin_release.yml` for every PR and `romlin`
 push, so publication requires the plain, ASan and UBSan suites for the
-same commit as the packaged cores. The old `master`/`libretroization`
-pushes and manual suite runs remain available. `WORKSEMA_REPS=200` is
-unchanged. The fixed builds in `faultstress`, `spsc`, `mtvuring` and
-`pgscache`, plus the release-only `stackframe` check, run once in the plain
-lane. Internal sanitizer runs, iteration counts and stack limits remain
-intact; new suite directories are still discovered.
-This consolidation applies only to the GitHub Actions matrix. Local runs still
-execute every suite, including when `SANITIZER` is set.
+same commit as the packaged cores. Each lane runs as five parallel shards
+(`SHARDS=5`) instead of one long job. `WORKSEMA_REPS=200` is unchanged. The
+fixed builds in `faultstress`, `spsc`, `mtvuring` and `pgscache`, plus the
+release-only `stackframe` check, run once in the plain lane. Internal
+sanitizer runs, iteration counts and stack limits remain intact; new suite
+directories are still discovered. The consolidation applies only to the
+GitHub Actions matrix. Local runs still execute every suite, including when
+`SANITIZER` is set. Manual `tests.yml` dispatches remain available.
 
 The native core builds enable `LRPS2_SMOKE_GATE`, exercising libretro
 initialization, BIOS-less load failure and teardown after linking. Linux

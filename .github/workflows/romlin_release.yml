@@ -43,9 +43,9 @@ jobs:
       - name: Install Linux compiler cache
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y ccache
-      - name: Cache Linux compilation
+      - name: Restore Linux compilation cache
         if: runner.os == 'Linux'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .ccache
           key: core-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
@@ -70,6 +70,14 @@ jobs:
           export LRPS2_CORE
           sh tests/secondload/build.sh
           sh tests/swdraw/build.sh
+      # Only romlin pushes save, so PR runs never evict the cache that the
+      # next release build restores.
+      - name: Save Linux compilation cache
+        if: runner.os == 'Linux' && github.event_name == 'push' && github.ref == 'refs/heads/romlin'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .ccache
+          key: core-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
       - name: Package core and checksum
         shell: bash
         env:
