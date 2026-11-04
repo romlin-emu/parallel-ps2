@@ -794,6 +794,10 @@ static void check_variables(bool first_run)
 				setting_native_scaling = GSNativeScaling::NativeScaling_Normal;
 			else if (!strcmp(var.value, "Aggressive"))
 				setting_native_scaling = GSNativeScaling::NativeScaling_Aggressive;
+			else if (!strcmp(var.value, "Normal (Maintain Upscale)"))
+				setting_native_scaling = GSNativeScaling::NativeScaling_NormalUpscaled;
+			else if (!strcmp(var.value, "Aggressive (Maintain Upscale)"))
+				setting_native_scaling = GSNativeScaling::NativeScaling_AggressiveUpscaled;
 			else
 				setting_native_scaling = -1;
 
@@ -1065,6 +1069,8 @@ static void check_variables(bool first_run)
 					setting_half_pixel_offset = GSHalfPixelOffset::SpecialAggressive;
 				else if (!strcmp(var.value, "Align to Native"))
 					setting_half_pixel_offset = GSHalfPixelOffset::Native;
+				else if (!strcmp(var.value, "Align to Native - with Texture Offset"))
+					setting_half_pixel_offset = GSHalfPixelOffset::NativeWTexOffset;
 
 				if (first_run || setting_half_pixel_offset != half_pixel_offset_prev)
 				{

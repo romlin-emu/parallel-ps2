@@ -316,16 +316,27 @@ enum GSHalfPixelOffset
 	Special,
 	SpecialAggressive,
 	Native,
+	NativeWTexOffset, // Align to Native, with the texture offset in place of the half native pixel move of a scaled source
 	MaxCount
 };
 
+// Appended after Off so the values the core options and saved settings use keep their numbers;
+// the game database's own numbering is translated in GameDatabase.cpp.
 enum GSNativeScaling
 {
 	NativeScaling_Normal = 0,
 	NativeScaling_Aggressive,
 	NativeScaling_Off,
+	NativeScaling_NormalUpscaled,     // Normal, keeping the upscale of the target a downscaling blend is drawn to
+	NativeScaling_AggressiveUpscaled, // Aggressive, likewise
 	NativeScaling_MaxCount
 };
+
+// The Maintain Upscale modes: Off is numbered between Aggressive and these, so a range test would not do.
+static inline bool GSNativeScalingMaintainsUpscale(GSNativeScaling mode)
+{
+	return mode == NativeScaling_NormalUpscaled || mode == NativeScaling_AggressiveUpscaled;
+}
 
 // Template function for casting enumerations to their underlying type
 template <typename Enumeration>

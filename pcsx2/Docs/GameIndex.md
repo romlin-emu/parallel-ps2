@@ -173,8 +173,8 @@ The clamp modes are also numerically based.
 *   bilinearUpscale          [`0` or `1`]                      {Off or On}       Default: Off (`0`)
 *   skipDrawStart            [Value between `0` to `10000`]    {0-10000}         Default: Off (`0`)
 *   skipDrawEnd              [Value between `0` to `10000`]    {0-10000}         Default: Off (`0`)
-*   halfPixelOffset          [`0` to `5`]   {Off, Normal Vertex, Special Texture, Special Texture Aggressive, Align to Native or Align to Native with Texture Offset (applied as Align to Native)}    Default: Off (`0`)
-*   nativeScaling            [`0` to `4`]   {Off, Normal, Aggressive, Normal (Maintain Upscale) or Aggressive (Maintain Upscale) (3 and 4 are applied as 1 and 2)}    Default: Normal
+*   halfPixelOffset          [`0` to `5`]   {Off, Normal Vertex, Special Texture, Special Texture Aggressive, Align to Native or Align to Native with Texture Offset}    Default: Off (`0`)
+*   nativeScaling            [`0` to `4`]   {Off, Normal, Aggressive, Normal (Maintain Upscale) or Aggressive (Maintain Upscale)}    Default: Normal
 *   roundSprite              [`0` or `1` or `2`]          {Off, Half or Full}    Default: Off (`0`)
 
 ## Game Fixes
