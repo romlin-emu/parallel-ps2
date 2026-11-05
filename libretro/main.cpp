@@ -2943,6 +2943,7 @@ void retro_unload_game(void)
 	VMManager::SetVMThread(NULL);
 	libretro_teardown_cpu_thread();
 
+	Input::ResetSelection();
 	retro_set_region(RETRO_REGION_NTSC); /* set back to default */
 }
 
@@ -3028,6 +3029,11 @@ void retro_run(void)
 	if (pending_update_av_info)
 		update_av_info();
 
+	if (Input::SelectionPending())
+	{
+		cpu_thread_pause();
+		Input::ApplySelection();
+	}
 	Input::Update();
 	usb_eyetoy::FrontendRun();
 

@@ -115,6 +115,9 @@ namespace Input
 	void Init();
 	void Update();
 	void Shutdown();
+	bool SelectionPending();
+	void ApplySelection();
+	void ResetSelection();
 }
 
 /* The input Input::Update staged becomes what the pads report. Only

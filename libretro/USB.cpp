@@ -54,7 +54,8 @@ extern retro_input_state_t PADGetInputStateCallback(void);
  * USB ports to the same frontend port. */
 void USBSetPortDevice(unsigned port, int device, unsigned input_port)
 {
-	if (port < USB::NUM_PORTS)
+	if (port < USB::NUM_PORTS &&
+		(device == USB_DEV_NONE || device == USB_DEV_KEYBOARD || device == USB_DEV_MOUSE))
 	{
 		s_port_device[port] = device;
 		s_input_port[port]  = input_port;
@@ -267,7 +268,12 @@ static u32 USBPortKind(u32 port)
 		return USB_KIND_NONE;
 	if ((int)port == s_camera_port)
 		return s_camera == USB_CAMERA_EYETOY ? USB_KIND_EYETOY : USB_KIND_CAPTURE_EYE;
-	return s_port_device[port] == USB_DEV_KEYBOARD ? USB_KIND_KEYBOARD : USB_KIND_MOUSE;
+	switch (s_port_device[port])
+	{
+		case USB_DEV_KEYBOARD: return USB_KIND_KEYBOARD;
+		case USB_DEV_MOUSE: return USB_KIND_MOUSE;
+		default: return USB_KIND_NONE;
+	}
 }
 
 static void USBFreezeOHCI(UsbState& st)

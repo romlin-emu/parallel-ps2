@@ -13,6 +13,7 @@
 // neither V4L2 nor ALSA here.
 
 #include "USB/USB.h"
+#include "PAD/USBSelection.h"
 #include "USB/libretro-usb/USBinternal.h"
 #include "USB/libretro-usb/qusb.h"
 #include "USB/libretro-usb/desc.h"
@@ -145,6 +146,15 @@ static size_t slot_altsetting_offset(void)
 
 int main()
 {
+	int selected[2] = {RETRO_DEVICE_KEYBOARD_AND_MOUSE, RETRO_DEVICE_MOUSE};
+	USBSelection allocation = SelectUSBDevices(selected);
+	check(allocation.device[0] == USB_DEV_KEYBOARD && allocation.device[1] == USB_DEV_MOUSE && allocation.input[1] == 0, "combined reserves both ports");
+	selected[0] = RETRO_DEVICE_JOYPAD;
+	allocation = SelectUSBDevices(selected);
+	check(allocation.device[0] == USB_DEV_NONE && allocation.device[1] == USB_DEV_MOUSE && allocation.input[1] == 1, "releasing combined restores the other selection");
+	selected[0] = selected[1] = RETRO_DEVICE_KEYBOARD_AND_MOUSE;
+	allocation = SelectUSBDevices(selected);
+	check(allocation.input[0] == 0 && allocation.input[1] == 0, "port zero wins combined conflict");
 	static const int REG = 0x10; /* OV519_R10_H_SIZE: harmless, logged, kept */
 	iopMem = (IopVM_MemoryAllocMess*)calloc(1, sizeof(IopVM_MemoryAllocMess));
 
@@ -155,6 +165,12 @@ int main()
 	USBDevice* kbd = USBGetPortDevice(0);
 	USBDevice* cam = USBGetPortDevice(1);
 	check(kbd && cam, "keyboard on port 0, EyeToy on port 1");
+	USBSetPortDevice(0, 999, 0);
+	USBSetPortDevice(USB::NUM_PORTS, USB_DEV_MOUSE, 0);
+	USBreset();
+	kbd = USBGetPortDevice(0);
+	cam = USBGetPortDevice(1);
+	check(kbd && cam, "invalid device and port leave the selection intact");
 
 	const size_t size = USBStateSize();
 	u8* state = (u8*)malloc(size);

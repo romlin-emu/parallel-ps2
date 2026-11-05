@@ -21,6 +21,7 @@
 #include <string.h>
 
 #include "PAD.h"
+#include "USBSelection.h"
 
 #include "HostFS.h"
 #include "../../common/Pcsx2Defs.h"
@@ -110,11 +111,6 @@ struct KeyStatus
 	ControllerType m_type[NUM_CONTROLLER_PORTS] = {};
 	u16 m_vibration_scale_q8[NUM_CONTROLLER_PORTS][2]; /* 8.8 fixed */
 };
-
-/* Combined "USB Keyboard + Mouse" port device: one menu selection that
- * attaches a HID keyboard to USB port 0 and a HID mouse to USB port 1,
- * matching the two-device topology a real PS2 keyboard/mouse presented. */
-#define RETRO_DEVICE_KEYBOARD_AND_MOUSE RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_KEYBOARD, 0)
 
 static const InputBindingInfo s_dualshock2_binds[] = {
 	{"Up", "D-Pad Up", InputBindingInfo::Type::Button, PAD_UP, GenericInputBinding::DPadUp},
@@ -283,6 +279,8 @@ static int16_t pad_latched_input(unsigned port, unsigned device, unsigned index,
 }
 
 static int pad_type[NUM_CONTROLLER_PORTS] = { -1, -1, -1, -1, -1, -1, -1, -1 };
+static int pending_pad_type[NUM_CONTROLLER_PORTS] = { -1, -1, -1, -1, -1, -1, -1, -1 };
+static bool selection_pending = false;
 
 PadSettings pad_settings[2];
 
@@ -611,50 +609,55 @@ void retro_set_controller_port_device(unsigned port, unsigned device)
 {
 	if (port >= NUM_CONTROLLER_PORTS)
 		return;
-	if (port >= 2 && device != RETRO_DEVICE_JOYPAD)
+	if (device != RETRO_DEVICE_JOYPAD && (port >= 2 ||
+		(device != RETRO_DEVICE_KEYBOARD && device != RETRO_DEVICE_MOUSE &&
+		 device != RETRO_DEVICE_KEYBOARD_AND_MOUSE)))
 		device = RETRO_DEVICE_NONE;
-	if (pad_type[port] != (int)device)
+	if (pending_pad_type[port] != (int)device)
 	{
-		pad_type[port] = device;
-
-		switch (device)
-		{
-			case RETRO_DEVICE_JOYPAD:
-				s_pad_type_name[port] = "DualShock2";
-				if (port < 2)
-					USBSetPortDevice(port, USB_DEV_NONE, port);
-				break;
-			case RETRO_DEVICE_KEYBOARD:
-				/* USB HID keyboard coexists with the DualShock on this slot,
-				 * as on real hardware - the pad stays available for menu/pause
-				 * navigation while the keyboard drives gameplay. */
-				s_pad_type_name[port] = "DualShock2";
-				USBSetPortDevice(port, USB_DEV_KEYBOARD, port);
-				break;
-			case RETRO_DEVICE_MOUSE:
-				/* USB HID mouse coexists with the DualShock on this slot. */
-				s_pad_type_name[port] = "DualShock2";
-				USBSetPortDevice(port, USB_DEV_MOUSE, port);
-				break;
-			case RETRO_DEVICE_KEYBOARD_AND_MOUSE:
-				/* Keyboard + mouse together claim both USB ports (kbd on 0,
-				 * mouse on 1) regardless of which controller port this was
-				 * selected from - the PS2 has only two USB ports. Both read
-				 * frontend input from this controller port. The DualShock on
-				 * this slot is kept for menu/pause navigation. */
-				s_pad_type_name[port] = "DualShock2";
-				USBSetPortDevice(0, USB_DEV_KEYBOARD, port);
-				USBSetPortDevice(1, USB_DEV_MOUSE, port);
-				break;
-			default:
-				s_pad_type_name[port] = "None";
-				if (port < 2)
-					USBSetPortDevice(port, USB_DEV_NONE, port);
-				break;
-		}
-
-		PAD::LoadConfig();
+		pending_pad_type[port] = device;
+		selection_pending = true;
 	}
+}
+
+bool Input::SelectionPending() { return selection_pending; }
+
+void Input::ApplySelection()
+{
+	if (!selection_pending)
+		return;
+	const USBSelection old_usb = SelectUSBDevices(pad_type);
+	const USBSelection new_usb = SelectUSBDevices(pending_pad_type);
+	Shutdown(); // Release latched keyboard and mouse input before reattaching.
+	for (unsigned port = 0; port < NUM_CONTROLLER_PORTS; port++)
+	{
+		pad_type[port] = pending_pad_type[port];
+		s_pad_type_name[port] = pad_type[port] < 0 ? nullptr :
+			(pad_type[port] == RETRO_DEVICE_NONE ? "None" : "DualShock2");
+	}
+	PAD::LoadConfig();
+	bool usb_changed = false;
+	for (unsigned port = 0; port < 2; port++)
+	{
+		if (old_usb.device[port] != new_usb.device[port] || old_usb.input[port] != new_usb.input[port])
+			usb_changed = true;
+		USBSetPortDevice(port, new_usb.device[port], new_usb.input[port]);
+	}
+	if (usb_changed)
+		USBreset();
+	selection_pending = false;
+}
+
+void Input::ResetSelection()
+{
+	for (unsigned port = 0; port < NUM_CONTROLLER_PORTS; port++)
+	{
+		pad_type[port] = pending_pad_type[port] = -1;
+		s_pad_type_name[port] = nullptr;
+	}
+	for (unsigned port = 0; port < 2; port++)
+		USBSetPortDevice(port, USB_DEV_NONE, port);
+	selection_pending = false;
 }
 
 void do_rumble(u8 intensity, unsigned type, unsigned port)
