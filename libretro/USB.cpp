@@ -19,6 +19,8 @@
 #include "../pcsx2/USB/libretro-usb/USBinternal.h"
 #include "../pcsx2/USB/libretro-usb/usb-hid.h"
 #include "../pcsx2/USB/usb-eyetoy/usb-eyetoy-webcam.h"
+#include "../pcsx2/USB/usb-mic/usb-mic.h"
+#include "../pcsx2/USB/libretro-usb/usb-buzz.h"
 #include "../pcsx2/USB/libretro-usb/desc.h"
 #include "../pcsx2/USB/libretro-usb/usb-state.h"
 #include "../pcsx2/SaveState.h"
@@ -41,8 +43,10 @@ static s64        s_usb_remaining = 0;
 
 static int        s_port_device[USB::NUM_PORTS] = { USB_DEV_NONE, USB_DEV_NONE };
 static unsigned   s_input_port[USB::NUM_PORTS]  = { 0, 1 };
-static int        s_camera      = USB_CAMERA_NONE;
-static int        s_camera_port = -1;
+static int        s_camera         = USB_CAMERA_NONE;
+static int        s_camera_port    = -1;
+static int        s_accessory      = USB_ACCESSORY_NONE;
+static int        s_accessory_port = -1;
 static USBDevice* s_usb_device[USB::NUM_PORTS]  = { nullptr, nullptr };
 
 /* From PAD.cpp - the libretro input_state callback the frontend installed. */
@@ -73,6 +77,16 @@ void USBSetCamera(int camera)
 	s_camera = camera;
 }
 
+void USBSetAccessory(int accessory)
+{
+	s_accessory = accessory;
+}
+
+int USBGetAccessory(void)
+{
+	return s_accessory;
+}
+
 static void USBAttachDevice(u32 port, USBDevice* dev)
 {
 	GetOHCIPort(port).port.dev = dev;
@@ -99,27 +113,58 @@ static void USBCreateDevice(u32 port)
 		USBAttachDevice(port, dev);
 }
 
-static void USBCreateCamera(void)
+/* The first port no device has taken, or -1 with a warning naming what
+ * was left out. */
+static int USBFreePort(const char* what)
 {
 	u32 port;
-	USBDevice* dev;
-
-	s_camera_port = -1;
-	if (s_camera == USB_CAMERA_NONE)
-		return;
 	for (port = 0; port < USB::NUM_PORTS && s_usb_device[port]; port++)
 		;
 	if (port == USB::NUM_PORTS)
 	{
-		log_cb(RETRO_LOG_WARN, "USB: no free port for the camera\n");
-		return;
+		log_cb(RETRO_LOG_WARN, "USB: no free port for the %s\n", what);
+		return -1;
 	}
+	return (int)port;
+}
+
+static void USBCreateAccessory(void)
+{
+	USBDevice* dev;
+	int port;
+
+	s_accessory_port = -1;
+	if (s_accessory == USB_ACCESSORY_NONE)
+		return;
+	port = USBFreePort(s_accessory == USB_ACCESSORY_BUZZ ? "Buzz! receiver" : "SingStar microphone");
+	if (port < 0)
+		return;
+	dev = s_accessory == USB_ACCESSORY_BUZZ ?
+		usb_buzz::usb_buzz_create(port) :
+		usb_mic::usb_mic_create_singstar(port);
+	if (!dev)
+		return;
+	USBAttachDevice(port, dev);
+	s_accessory_port = port;
+}
+
+static void USBCreateCamera(void)
+{
+	USBDevice* dev;
+	int port;
+
+	s_camera_port = -1;
+	if (s_camera == USB_CAMERA_NONE)
+		return;
+	port = USBFreePort("camera");
+	if (port < 0)
+		return;
 	dev = usb_eyetoy::eyetoy_create(
 		s_camera == USB_CAMERA_EYETOY ? usb_eyetoy::TYPE_EYETOY : usb_eyetoy::TYPE_OV511P);
 	if (!dev)
 		return;
 	USBAttachDevice(port, dev);
-	s_camera_port = (int)port;
+	s_camera_port = port;
 }
 
 static void USBDestroyDevice(u32 port)
@@ -131,6 +176,35 @@ static void USBDestroyDevice(u32 port)
 		dev->klass.unrealize(dev);
 	GetOHCIPort(port).port.dev = nullptr;
 	s_usb_device[port] = nullptr;
+}
+
+/* What is attached to a port, for the savestate and the per-frame input. The
+ * values are saved: new kinds are appended. */
+enum UsbStateKind
+{
+	USB_KIND_NONE = 0,
+	USB_KIND_KEYBOARD,
+	USB_KIND_MOUSE,
+	USB_KIND_EYETOY,
+	USB_KIND_CAPTURE_EYE,
+	USB_KIND_BUZZ,
+	USB_KIND_SINGSTAR,
+};
+
+static u32 USBPortKind(u32 port)
+{
+	if (!s_usb_device[port])
+		return USB_KIND_NONE;
+	if ((int)port == s_accessory_port)
+		return s_accessory == USB_ACCESSORY_BUZZ ? USB_KIND_BUZZ : USB_KIND_SINGSTAR;
+	if ((int)port == s_camera_port)
+		return s_camera == USB_CAMERA_EYETOY ? USB_KIND_EYETOY : USB_KIND_CAPTURE_EYE;
+	switch (s_port_device[port])
+	{
+		case USB_DEV_KEYBOARD: return USB_KIND_KEYBOARD;
+		case USB_DEV_MOUSE: return USB_KIND_MOUSE;
+		default: return USB_KIND_NONE;
+	}
 }
 
 int usb_get_ticks_per_second(void)
@@ -163,6 +237,7 @@ bool USBopen(void)
 
 	for (u32 port = 0; port < USB::NUM_PORTS; port++)
 		USBCreateDevice(port);
+	USBCreateAccessory();
 	USBCreateCamera();
 	return true;
 }
@@ -197,6 +272,7 @@ void USBreset(void)
 
 	for (port = 0; port < USB::NUM_PORTS; port++)
 		USBCreateDevice(port);
+	USBCreateAccessory();
 	USBCreateCamera();
 }
 
@@ -205,15 +281,25 @@ void USBasync(u32 cycles)
 	if (!s_qemu_ohci)
 		return;
 
-	/* Pump one frame of frontend keyboard/mouse input into attached HID
-	 * devices before advancing the controller. */
+	/* Pump one frame of frontend input into the attached devices before
+	 * advancing the controller. */
 	{
 		retro_input_state_t input_cb = PADGetInputStateCallback();
 		u32 port;
 		for (port = 0; port < USB::NUM_PORTS; port++)
 		{
-			if (s_usb_device[port] && (int)port != s_camera_port)
-				usb_hid::usb_hid_update(s_usb_device[port], input_cb, s_input_port[port]);
+			switch (USBPortKind(port))
+			{
+				case USB_KIND_KEYBOARD:
+				case USB_KIND_MOUSE:
+					usb_hid::usb_hid_update(s_usb_device[port], input_cb, s_input_port[port]);
+					break;
+				case USB_KIND_BUZZ:
+					usb_buzz::usb_buzz_update(s_usb_device[port]);
+					break;
+				default:
+					break;
+			}
 		}
 	}
 
@@ -252,29 +338,6 @@ s32 USBfreeze(FreezeAction mode, freezeData* data) { return 0; }
 #define USB_STATE_SIZE    (USB_STATE_OHCI + USB::NUM_PORTS * USB_STATE_SLOT + 16)
 #define USB_STATE_VERSION 1
 #define USB_STATE_MAGIC   "LRPS2USB"
-
-enum UsbStateKind
-{
-	USB_KIND_NONE = 0,
-	USB_KIND_KEYBOARD,
-	USB_KIND_MOUSE,
-	USB_KIND_EYETOY,
-	USB_KIND_CAPTURE_EYE,
-};
-
-static u32 USBPortKind(u32 port)
-{
-	if (!s_usb_device[port])
-		return USB_KIND_NONE;
-	if ((int)port == s_camera_port)
-		return s_camera == USB_CAMERA_EYETOY ? USB_KIND_EYETOY : USB_KIND_CAPTURE_EYE;
-	switch (s_port_device[port])
-	{
-		case USB_DEV_KEYBOARD: return USB_KIND_KEYBOARD;
-		case USB_DEV_MOUSE: return USB_KIND_MOUSE;
-		default: return USB_KIND_NONE;
-	}
-}
 
 static void USBFreezeOHCI(UsbState& st)
 {
@@ -377,10 +440,22 @@ static void USBFreezePort(u32 port, u32 kind, UsbState& st)
 	USBDevice* dev = s_usb_device[port];
 
 	USBFreezeDevice(dev, st);
-	if (kind == USB_KIND_EYETOY || kind == USB_KIND_CAPTURE_EYE)
-		usb_eyetoy::eyetoy_freeze(dev, st);
-	else
-		usb_hid::usb_hid_freeze(dev, st);
+	switch (kind)
+	{
+		case USB_KIND_EYETOY:
+		case USB_KIND_CAPTURE_EYE:
+			usb_eyetoy::eyetoy_freeze(dev, st);
+			break;
+		case USB_KIND_BUZZ:
+			usb_buzz::usb_buzz_freeze(dev, st);
+			break;
+		case USB_KIND_SINGSTAR:
+			usb_mic::usb_mic_freeze(dev, st);
+			break;
+		default:
+			usb_hid::usb_hid_freeze(dev, st);
+			break;
+	}
 }
 
 static const u8* USBStateFind(const void* state, size_t size)

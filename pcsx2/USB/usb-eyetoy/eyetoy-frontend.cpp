@@ -4,6 +4,8 @@
 #include "eyetoy-frontend.h"
 #include "eyetoy-host.h"
 #include "cam-frame.h"
+#include "USB/USB.h"
+#include "USB/shared/sample-ring.h"
 
 #include <retro_atomic.h>
 
@@ -48,7 +50,7 @@ namespace usb_eyetoy
 		retro_atomic_int_t s_cam_config;
 		FrameMailbox s_frames;
 		retro_atomic_int_t s_mic_wanted;
-		SampleRing s_ring;
+		usb_shared::SampleRing s_ring;
 
 		// Main thread only.
 		bool s_cam_available;
@@ -301,7 +303,9 @@ namespace usb_eyetoy
 
 		memset(&s_mic_if, 0, sizeof(s_mic_if));
 		s_mic_if.interface_version = RETRO_MICROPHONE_INTERFACE_VERSION;
-		s_mic_available = environ_cb(RETRO_ENVIRONMENT_GET_MICROPHONE_INTERFACE, &s_mic_if) &&
+		// The frontend's microphone handles belong to SingStar while it is attached.
+		const bool singstar = USBGetAccessory() == USB_ACCESSORY_SINGSTAR;
+		s_mic_available = !singstar && environ_cb(RETRO_ENVIRONMENT_GET_MICROPHONE_INTERFACE, &s_mic_if) &&
 			s_mic_if.interface_version && s_mic_if.open_mic && s_mic_if.read_mic;
 
 		log_cb(RETRO_LOG_INFO, "EyeToy: camera from the %s, microphone from the %s\n",

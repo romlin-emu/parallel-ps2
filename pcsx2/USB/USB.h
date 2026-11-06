@@ -90,6 +90,28 @@ enum UsbCamera
 
 void USBSetCamera(int camera);
 
+/* The accessory on the first USB port no other device claims (core option).
+ * Buzz! handsets are read from the frontend's controller ports 1-4, and the
+ * SingStar microphones are the frontend's microphones. */
+enum UsbAccessory
+{
+	USB_ACCESSORY_NONE = 0,
+	USB_ACCESSORY_BUZZ,
+	USB_ACCESSORY_SINGSTAR,
+};
+
+void USBSetAccessory(int accessory);
+int USBGetAccessory(void);
+
+/* Buzz! handset n (0-3): a five-bit mask of its buttons, bit 0 red, 1 yellow,
+ * 2 green, 3 orange, 4 blue, latched like the pads. */
+enum
+{
+	USB_BUZZ_HANDSETS = 4,
+	USB_BUZZ_BUTTONS = 5,
+};
+u32 PADGetBuzzButtons(unsigned handset);
+
 /* The device on a port, or NULL; for the harnesses under tests/. */
 struct USBDevice;
 USBDevice* USBGetPortDevice(unsigned port);

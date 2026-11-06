@@ -10,7 +10,9 @@
 // configuration or interface the device does not have.
 //
 // The frontend's camera and microphone are stubs, so the EyeToy opens
-// neither V4L2 nor ALSA here.
+// neither V4L2 nor ALSA here. Buzz! handsets and the SingStar microphones
+// are attached as the accessory option selects, and are checked the same
+// way: a report on each change, the last one kept across a state.
 
 #include "USB/USB.h"
 #include "PAD/USBSelection.h"
@@ -18,6 +20,7 @@
 #include "USB/libretro-usb/qusb.h"
 #include "USB/libretro-usb/desc.h"
 #include "USB/usb-eyetoy/eyetoy-frontend.h"
+#include "USB/usb-mic/mic-frontend.h"
 #include "MemoryTypes.h"
 
 #include "libretro.h"
@@ -54,15 +57,44 @@ retro_input_state_t PADGetInputStateCallback(void)
 	return stub_input;
 }
 
-/* A frontend with a camera and a microphone that deliver nothing. */
+/* Buzz! handsets: the buttons the frontend's controller ports report,
+ * per handset, as PADGetBuzzButtons latches them. */
+static u32 s_buzz[USB_BUZZ_HANDSETS];
+u32 PADGetBuzzButtons(unsigned handset)
+{
+	return handset < USB_BUZZ_HANDSETS ? s_buzz[handset] : 0;
+}
+
+/* A frontend with a camera that delivers nothing, and a microphone whose
+ * handles 1 and 2 (the first and second opened) give loud samples of
+ * opposite sign, so the channel each one lands in is visible. */
+static unsigned s_mic_opens;
 static bool RETRO_CALLCONV cam_start(void) { return true; }
 static void RETRO_CALLCONV cam_stop(void) {}
-static retro_microphone_t* RETRO_CALLCONV mic_open(const retro_microphone_params_t*) { return (retro_microphone_t*)1; }
+static retro_microphone_t* RETRO_CALLCONV mic_open(const retro_microphone_params_t*)
+{
+	return (retro_microphone_t*)(uintptr_t)(++s_mic_opens);
+}
 static void RETRO_CALLCONV mic_close(retro_microphone_t*) {}
 static bool RETRO_CALLCONV mic_get_params(const retro_microphone_t*, retro_microphone_params_t* p) { p->rate = 48000; return true; }
 static bool RETRO_CALLCONV mic_set_state(retro_microphone_t*, bool) { return true; }
 static bool RETRO_CALLCONV mic_get_state(const retro_microphone_t*) { return true; }
-static int RETRO_CALLCONV mic_read(retro_microphone_t*, int16_t*, size_t) { return 0; }
+static int RETRO_CALLCONV mic_read(retro_microphone_t* mic, int16_t* samples, size_t)
+{
+	const int16_t level = (uintptr_t)mic == 1 ? 12000 : -12000;
+	for (int i = 0; i < 480; i++)
+		samples[i] = level;
+	return 480;
+}
+
+static bool RETRO_CALLCONV stub_environ(unsigned cmd, void* data);
+
+static bool RETRO_CALLCONV stub_environ_nomic(unsigned cmd, void* data)
+{
+	if (cmd == RETRO_ENVIRONMENT_GET_MICROPHONE_INTERFACE)
+		return false;
+	return stub_environ(cmd, data);
+}
 
 static bool RETRO_CALLCONV stub_environ(unsigned cmd, void* data)
 {
@@ -129,6 +161,27 @@ static void eyetoy_write_reg(USBDevice* dev, int reg, u8 value)
 {
 	u8 data[8] = {value};
 	control(dev, VendorDeviceOutRequest | 0x1, 0, reg, data, 1);
+}
+
+/* One IN transfer on endpoint 1, the way the OHCI core would make it. Returns
+ * the status; the bytes received are in buf, and actual gets their count. */
+static int in_transfer(USBDevice* dev, u8* buf, unsigned size, int* actual)
+{
+	USBPacket p;
+	memset(&p, 0, sizeof(p));
+	p.ep = usb_ep_get(dev, USB_TOKEN_IN, 1);
+	p.pid = USB_TOKEN_IN;
+	p.buffer_ptr = buf;
+	p.buffer_size = size;
+	dev->klass.handle_data(dev, &p);
+	*actual = p.actual_length;
+	return p.status;
+}
+
+/* The buttons a Buzz! report carries: 20 bits from byte 2, bit 0 first. */
+static u32 buzz_report_buttons(const u8* report)
+{
+	return report[2] | (report[3] << 8) | ((report[4] & 0x0F) << 16);
 }
 
 /* Where the altsetting array sits in a port's slot: the kind, then the
@@ -254,7 +307,130 @@ int main()
 	USBStateRead(other, size);
 	check(USBGetPortDevice(1) == cam && eyetoy_read_reg(cam, REG) == def, "an empty slot replugs the device, so it starts afresh");
 
+	/* Buzz!: attached on the free port, one report per change of the
+	 * handsets, each of the 20 buttons its own bit, and the last report
+	 * kept across a state. The handsets are read through USBasync, as the
+	 * core runs them. */
+	USBSetCamera(USB_CAMERA_NONE);
+	USBSetAccessory(USB_ACCESSORY_BUZZ);
+	USBreset();
+	USBDevice* buzz = USBGetPortDevice(1);
+	check(buzz && USBGetPortDevice(0), "Buzz! receiver on the free port, keyboard kept");
+	usb_desc_set_config(buzz, 1);
+	check(buzz->configuration == 1, "Buzz! receiver enumerates");
+
+	u8 report[8];
+	int len = 0;
+	check(in_transfer(buzz, report, sizeof(report), &len) == USB_RET_NAK, "Buzz! idle: NAK");
+
+	bool buttons_ok = true;
+	for (u32 i = 0; i < USB_BUZZ_HANDSETS * USB_BUZZ_BUTTONS; i++)
+	{
+		s_buzz[i / USB_BUZZ_BUTTONS] = 1u << (i % USB_BUZZ_BUTTONS);
+		USBasync(0);
+		const int pressed = in_transfer(buzz, report, sizeof(report), &len);
+		buttons_ok = buttons_ok && pressed == USB_RET_SUCCESS && len == 5 && buzz_report_buttons(report) == 1u << i;
+		buttons_ok = buttons_ok && in_transfer(buzz, report, sizeof(report), &len) == USB_RET_NAK;
+		s_buzz[i / USB_BUZZ_BUTTONS] = 0;
+		USBasync(0);
+		buttons_ok = buttons_ok && in_transfer(buzz, report, sizeof(report), &len) == USB_RET_SUCCESS && buzz_report_buttons(report) == 0;
+	}
+	check(buttons_ok, "Buzz! each of 20 buttons: its report bit, NAK until changed");
+
+	for (int h = 0; h < USB_BUZZ_HANDSETS; h++)
+		s_buzz[h] = 0x1F;
+	USBasync(0);
+	check(in_transfer(buzz, report, sizeof(report), &len) == USB_RET_SUCCESS && buzz_report_buttons(report) == 0xFFFFF,
+		"Buzz! all handsets at once in one report");
+	for (int h = 0; h < USB_BUZZ_HANDSETS; h++)
+		s_buzz[h] = 0;
+
+	s_buzz[0] = 1;
+	USBasync(0);
+	in_transfer(buzz, report, sizeof(report), &len);
+	USBStateWrite(state);
+	check(!memcmp(state + size - 8, "LRPS2USB", 8), "Buzz! state written with its block");
+	s_buzz[0] = 0;
+	USBasync(0);
+	in_transfer(buzz, report, sizeof(report), &len);
+	USBStateRead(state, size);
+	check(USBGetPortDevice(1) == buzz, "Buzz! state keeps the receiver");
+	s_buzz[0] = 1;
+	USBasync(0);
+	check(in_transfer(buzz, report, sizeof(report), &len) == USB_RET_NAK, "Buzz! state restores the last report sent");
+	s_buzz[0] = 0;
+
+	/* SingStar with no frontend microphone: the adapter enumerates and
+	 * streams silence at full length. */
+	USBSetAccessory(USB_ACCESSORY_SINGSTAR);
+	usb_mic::FrontendLoad(stub_environ_nomic);
+	USBreset();
+	USBDevice* mic = USBGetPortDevice(1);
+	check(mic && USBGetPortDevice(0), "SingStar adapter on the free port, keyboard kept");
+	usb_desc_set_config(mic, 1);
+	check(mic->configuration == 1, "SingStar adapter enumerates");
+	usb_desc_set_interface(mic, 1, 2);
+	usb_mic::FrontendRun();
+	u8 pcm[192];
+	memset(pcm, 0x55, sizeof(pcm));
+	const int mic_status = in_transfer(mic, pcm, sizeof(pcm), &len);
+	bool silent = true;
+	for (unsigned i = 0; i < sizeof(pcm); i++)
+		silent = silent && pcm[i] == 0;
+	check(mic_status == USB_RET_SUCCESS && len == (int)sizeof(pcm) && silent, "SingStar without a microphone streams silence");
+
+	/* SingStar with the frontend's microphones: player 1 is the left
+	 * channel, player 2 the right. */
+	usb_mic::FrontendUnload();
+	usb_mic::FrontendLoad(stub_environ);
+	USBreset();
+	mic = USBGetPortDevice(1);
+	usb_desc_set_config(mic, 1);
+	usb_desc_set_interface(mic, 1, 2);
+	s_mic_opens = 0;
+	usb_mic::FrontendRun();
+	check(s_mic_opens == 2, "SingStar opens both microphones, player 1 first");
+	in_transfer(mic, pcm, sizeof(pcm), &len);
+	bool left_positive = true, right_negative = true;
+	for (unsigned i = 0; i + 1 < sizeof(pcm); i += 4)
+	{
+		const int16_t left = (int16_t)(pcm[i] | (pcm[i + 1] << 8));
+		const int16_t right = (int16_t)(pcm[i + 2] | (pcm[i + 3] << 8));
+		left_positive = left_positive && left > 0;
+		right_negative = right_negative && right < 0;
+	}
+	check(left_positive && right_negative, "SingStar left channel is player 1, right is player 2");
+
+	/* The game picks 8 kHz: one read of the microphone's 480 samples at
+	 * 48 kHz comes out as 80 frames, 8 per 1 ms packet. */
+	usb_mic::FrontendUnload();
+	usb_mic::FrontendLoad(stub_environ);
+	USBreset();
+	mic = USBGetPortDevice(1);
+	usb_desc_set_config(mic, 1);
+	u8 rate[3] = { 8000 & 0xff, 8000 >> 8, 0 };
+	control(mic, ClassEndpointOutRequest | 0x01 /* SET_CUR */, 0x01 << 8 /* sampling frequency */, 0x81, rate, sizeof(rate));
+	usb_desc_set_interface(mic, 1, 2);
+	usb_mic::FrontendRun();
+	unsigned frames = 0, packets = 0;
+	while (packets < 32 && in_transfer(mic, pcm, sizeof(pcm), &len) == USB_RET_SUCCESS)
+	{
+		frames += len / 4;
+		packets++;
+	}
+	check(frames == 80 && packets == 10, "SingStar follows the rate the game sets");
+	usb_mic::FrontendRun();
+
+	/* The alternate setting is kept across a state. */
+	USBStateWrite(state);
+	check(!memcmp(state + size - 8, "LRPS2USB", 8), "SingStar state written with its block");
+	usb_desc_set_interface(mic, 1, 0);
+	USBStateRead(state, size);
+	check(USBGetPortDevice(1) == mic && mic->altsetting[1] == 2, "SingStar state keeps the stream setting");
+
+	USBSetAccessory(USB_ACCESSORY_NONE);
 	USBclose();
+	usb_mic::FrontendUnload();
 	usb_eyetoy::FrontendUnload();
 	free(state);
 	free(other);

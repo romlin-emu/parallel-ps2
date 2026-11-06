@@ -31,6 +31,7 @@
 #include "../pcsx2/CDVD/CDVD_host.h"
 #include "../pcsx2/USB/USB.h"
 #include "../pcsx2/USB/usb-eyetoy/eyetoy-frontend.h"
+#include "../pcsx2/USB/usb-mic/mic-frontend.h"
 #include "../pcsx2/DEV9/ATA/HddCreate.h"
 #include "../pcsx2/MTVU.h"
 #include "../pcsx2/Counters.h"
@@ -89,6 +90,7 @@ struct retro_hw_render_callback hw_render;
 static Pcsx2Config s_option_config;
 static bool        s_option_fast_boot = true;
 static int         s_option_camera    = USB_CAMERA_NONE;
+static int         s_option_accessory = USB_ACCESSORY_NONE;
 static char        s_option_memcards[PCSX2_PATH_MAX];
 const Pcsx2Config& Host::OptionConfig() { return s_option_config; }
 bool               host_option_fast_boot(void) { return s_option_fast_boot; }
@@ -529,6 +531,17 @@ static void check_variables(bool first_run)
 				s_option_camera = USB_CAMERA_CAPTURE_EYE;
 		}
 		USBSetCamera(s_option_camera);
+
+		var.key = "pcsx2_usb_accessory";
+		s_option_accessory = USB_ACCESSORY_NONE;
+		if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+		{
+			if (!strcmp(var.value, "buzz"))
+				s_option_accessory = USB_ACCESSORY_BUZZ;
+			else if (!strcmp(var.value, "singstar"))
+				s_option_accessory = USB_ACCESSORY_SINGSTAR;
+		}
+		USBSetAccessory(s_option_accessory);
 	}
 
 	if (setting_plugin_type == PLUGIN_PGS)
@@ -2601,6 +2614,8 @@ bool retro_load_game(const struct retro_game_info* game)
 	check_variables(true);
 	if (s_option_camera != USB_CAMERA_NONE)
 		usb_eyetoy::FrontendLoad(environ_cb);
+	if (s_option_accessory == USB_ACCESSORY_SINGSTAR)
+		usb_mic::FrontendLoad(environ_cb);
 
 	if (setting_bios.empty())
 	{
@@ -2917,6 +2932,7 @@ void retro_unload_game(void)
 
 	VMManager::Shutdown();
 	usb_eyetoy::FrontendUnload();
+	usb_mic::FrontendUnload();
 	/* Shutdown() flipped state to Stopping; if cpu_thread is sleeping
 	 * in its 'case Paused' wait (post cpu_thread_pause above), it
 	 * needs a notify to observe the new state and run through to its
@@ -3036,6 +3052,7 @@ void retro_run(void)
 	}
 	Input::Update();
 	usb_eyetoy::FrontendRun();
+	usb_mic::FrontendRun();
 
 	/* No renderer, or a GS that lost its device and could make no other:
 	 * the EE stays parked and the frame is the last. */

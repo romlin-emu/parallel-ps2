@@ -184,6 +184,21 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "disabled"
    },
    {
+      "pcsx2_usb_accessory",
+      "System > USB Accessory (Restart)",
+      "USB Accessory (Restart)",
+      "Plugs a Buzz! receiver or SingStar microphone adapter into a free USB port. Buzz! handsets use controller ports 1 to 4. SingStar uses the frontend's microphones: the first is player 1, the second player 2.",
+      NULL,
+      "system",
+      {
+         { "disabled", NULL },
+         { "buzz", "Buzz! Buzzers" },
+         { "singstar", "SingStar Microphones" },
+         { NULL, NULL },
+      },
+      "disabled"
+   },
+   {
       "pcsx2_dev9_hdd",
       "System > HDD (DEV9)",
       "HDD (DEV9)",

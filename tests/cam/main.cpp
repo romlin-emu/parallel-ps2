@@ -1,11 +1,11 @@
 // EyeToy frame and sample handoff, and the encoders behind them.
 //
-// FrameMailbox and SampleRing (pcsx2/USB/usb-eyetoy/cam-frame.h) are the
-// lock-free handoffs between the thread that captures (the frontend's camera
-// callback or the V4L2 thread) and the thread that runs the device. A
-// producer and a consumer hammer each from two threads: every frame taken
-// must be whole and never older than the one before, every sample run must
-// be in order. Built with TSan too, since the two share nothing but the
+// FrameMailbox (pcsx2/USB/usb-eyetoy/cam-frame.h) and SampleRing
+// (pcsx2/USB/shared/sample-ring.h) are the lock-free handoffs between the
+// thread that captures (the frontend's camera callback or the V4L2 thread)
+// and the thread that runs the device. A producer and a consumer hammer each
+// from two threads: every frame taken must be whole and never older than the
+// one before, every sample run must be in order. Built with TSan too, since the two share nothing but the
 // primitive.
 //
 // The encoders are checked by parsing what they emit: a JFIF the game's
@@ -14,6 +14,7 @@
 // layout, sampled every fourth pixel.
 
 #include "cam-frame.h"
+#include "USB/shared/sample-ring.h"
 #include "cam-jpeg.h"
 #include "jo_mpeg.h"
 
@@ -119,7 +120,7 @@ static u32 s_ring_dropped;
 
 static void* ring_producer(void* arg)
 {
-	SampleRing* r = static_cast<SampleRing*>(arg);
+	usb_shared::SampleRing* r = static_cast<usb_shared::SampleRing*>(arg);
 	s_ring_dropped = 0;
 	for (u32 i = 0; i < RING_SAMPLES; i++)
 	{
@@ -135,9 +136,9 @@ static void* ring_producer(void* arg)
 
 static void test_ring()
 {
-	SampleRing* r = static_cast<SampleRing*>(malloc(sizeof(SampleRing)));
+	usb_shared::SampleRing* r = static_cast<usb_shared::SampleRing*>(malloc(sizeof(usb_shared::SampleRing)));
 	r->Reset();
-	check(r->Count() == 0 && r->Space() == SampleRing::MASK, "ring starts empty");
+	check(r->Count() == 0 && r->Space() == usb_shared::SampleRing::MASK, "ring starts empty");
 
 	// Single-threaded: fill, trim, pop.
 	for (u32 i = 0; i < 100; i++)
@@ -148,9 +149,9 @@ static void test_ring()
 	u32 n = r->Pop(out, 64);
 	check(n == 20 && out[0] == 80 && out[19] == 99, "TrimTo keeps the newest 20");
 	check(r->Count() == 0, "popped empty");
-	for (u32 i = 0; i < SampleRing::SIZE + 10; i++)
+	for (u32 i = 0; i < usb_shared::SampleRing::SIZE + 10; i++)
 		r->Push(0);
-	check(r->Count() == SampleRing::MASK && r->Space() == 0, "a full ring holds SIZE-1 and drops");
+	check(r->Count() == usb_shared::SampleRing::MASK && r->Space() == 0, "a full ring holds SIZE-1 and drops");
 
 	// Two threads, several rounds: every sample is read once in order, or
 	// was dropped by the producer on a full ring; nothing is read twice,

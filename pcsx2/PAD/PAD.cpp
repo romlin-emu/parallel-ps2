@@ -202,6 +202,10 @@ struct pad_input
 static struct pad_input pad_staged[NUM_CONTROLLER_PORTS];
 static struct pad_input pad_live[NUM_CONTROLLER_PORTS];
 
+/* Buzz! handsets, by frontend port; masked as PADGetBuzzButtons describes. */
+static u32 buzz_staged[USB_BUZZ_HANDSETS];
+static u32 buzz_live[USB_BUZZ_HANDSETS];
+
 /* The pcsx2_multitap option as it was when the content loaded: bit 0 a
  * multitap in console port 1, bit 1 one in console port 2. It changes
  * only on the next load, as the option says. */
@@ -245,6 +249,30 @@ extern "C" void pad_input_latch(void)
 		pad_staged[port].mouse_x = 0;
 		pad_staged[port].mouse_y = 0;
 	}
+	for (port = 0; port < USB_BUZZ_HANDSETS; port++)
+		buzz_live[port] = buzz_staged[port];
+}
+
+u32 PADGetBuzzButtons(unsigned handset)
+{
+	return handset < USB_BUZZ_HANDSETS ? buzz_live[handset] : 0;
+}
+
+/* Red, yellow, green, orange, blue: the bit order of the Buzz! report. */
+static u32 buzz_read_handset(unsigned port)
+{
+	static constexpr unsigned ids[USB_BUZZ_BUTTONS] = {
+		RETRO_DEVICE_ID_JOYPAD_A,
+		RETRO_DEVICE_ID_JOYPAD_Y,
+		RETRO_DEVICE_ID_JOYPAD_X,
+		RETRO_DEVICE_ID_JOYPAD_B,
+		RETRO_DEVICE_ID_JOYPAD_R,
+	};
+	u32 mask = 0;
+	for (unsigned b = 0; b < USB_BUZZ_BUTTONS; b++)
+		if (input_cb(port, RETRO_DEVICE_JOYPAD, 0, ids[b]))
+			mask |= 1u << b;
+	return mask;
 }
 
 /* The input_state the USB HID devices read through: the latched copy. */
@@ -499,6 +527,7 @@ namespace Input
 	void Shutdown()
 	{
 		memset(pad_staged, 0, sizeof(pad_staged));
+		memset(buzz_staged, 0, sizeof(buzz_staged));
 		for (unsigned pad = 0; pad < NUM_CONTROLLER_PORTS; pad++)
 			pad_staged[pad].buttons = 0xFFFFFFFF;
 		pad_input_latch();
@@ -507,6 +536,10 @@ namespace Input
 	void Update()
 	{
 		poll_cb();
+
+		if (USBGetAccessory() == USB_ACCESSORY_BUZZ)
+			for (unsigned handset = 0; handset < USB_BUZZ_HANDSETS; handset++)
+				buzz_staged[handset] = buzz_read_handset(handset);
 
 		for (unsigned port = 0; port < NUM_CONTROLLER_PORTS; port++)
 		{
