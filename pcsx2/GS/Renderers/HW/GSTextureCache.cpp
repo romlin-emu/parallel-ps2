@@ -6644,7 +6644,7 @@ GSTextureCache::HashCacheEntry* GSTextureCache::LookupHashCache(const GIFRegTEX0
 	if (replace)
 	{
 		bool replacement_texture_pending = false;
-		std::pair<u8, u8> alpha_minmax;
+		GSAlphaMinMax alpha_minmax;
 		GSTexture* replacement_tex = GSTextureReplacements::LookupReplacementTexture(key, lod != nullptr,
 			&replacement_texture_pending, &alpha_minmax);
 		if (replacement_tex)
@@ -9140,7 +9140,7 @@ void GSTextureCache::InvalidateTemporarySource()
 	m_temporary_source = nullptr;
 }
 
-void GSTextureCache::InjectHashCacheTexture(const HashCacheKey& key, GSTexture* tex, const std::pair<u8, u8>& alpha_minmax)
+void GSTextureCache::InjectHashCacheTexture(const HashCacheKey& key, GSTexture* tex, const GSAlphaMinMax& alpha_minmax)
 {
 	// When we insert we update memory usage. Old texture gets removed below.
 	m_hash_cache_replacement_memory_usage += tex->GetMemUsage();

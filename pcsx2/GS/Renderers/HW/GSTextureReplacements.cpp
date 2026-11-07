@@ -112,7 +112,7 @@ namespace GSTextureReplacements
 	static std::optional<TextureName> ParseReplacementName(const std::string& filename);
 	static std::string GetGameTextureDirectory();
 	template <GSTexture::Format format>
-	std::pair<u8, u8> GetBCAlphaMinMax(ReplacementTexture& rtex);
+	GSAlphaMinMax GetBCAlphaMinMax(ReplacementTexture& rtex);
 	static void SetReplacementTextureAlphaMinMax(ReplacementTexture& rtex);
 	static std::optional<ReplacementTexture> LoadReplacementTexture(const TextureName& name, const std::string& filename, bool only_base_image);
 	static void QueueAsyncReplacementTextureLoad(const TextureName& name, const std::string& filename, bool mipmap, bool cache_only);
@@ -344,15 +344,17 @@ void GSTextureReplacements::ReloadReplacementMap()
 
 	const std::string replacement_dir = JoinPath(GetGameTextureDirectory().c_str(), TEXTURE_REPLACEMENT_SUBDIRECTORY_NAME);
 
-	FileSystem::FindResultsArray files;
-	if (!FileSystem::FindFiles(replacement_dir.c_str(), "*", FILESYSTEM_FIND_FILES | FILESYSTEM_FIND_HIDDEN_FILES | FILESYSTEM_FIND_RECURSIVE, &files))
+	FILESYSTEM_FIND_RESULTS files = {};
+	if (!FileSystem_FindFiles(replacement_dir.c_str(), "*", FILESYSTEM_FIND_FILES | FILESYSTEM_FIND_HIDDEN_FILES | FILESYSTEM_FIND_RECURSIVE, &files))
 		return;
 
 	std::string filename;
-	for (FILESYSTEM_FIND_DATA& fd : files)
+	for (size_t i = 0; i < files.count; i++)
 	{
+		FILESYSTEM_FIND_DATA& fd = files.items[i];
+
 		// file format we can handle?
-		filename = path_basename(fd.FileName.c_str());
+		filename = path_basename(fd.FileName);
 		if (!GetLoader(filename.c_str()))
 			continue;
 
@@ -361,12 +363,13 @@ void GSTextureReplacements::ReloadReplacementMap()
 		if (!name.has_value())
 			continue;
 
-		s_replacement_texture_filenames.emplace(name.value(), std::move(fd.FileName));
+		s_replacement_texture_filenames.emplace(name.value(), fd.FileName);
 
 		// zero out the CLUT hash, because we need this for checking if there's any replacements with this hash when using paltex
 		name->CLUTHash = 0;
 		s_replacement_textures_without_clut_hash.insert(name.value());
 	}
+	FileSystem_FreeFindResults(&files);
 
 	if (!s_replacement_texture_filenames.empty())
 	{
@@ -427,7 +430,7 @@ bool GSTextureReplacements::HasReplacementTextureWithOtherPalette(const GSTextur
 }
 
 GSTexture* GSTextureReplacements::LookupReplacementTexture(const GSTextureCache::HashCacheKey& hash, bool mipmap,
-	bool* pending, std::pair<u8, u8>* alpha_minmax)
+	bool* pending, GSAlphaMinMax* alpha_minmax)
 {
 	const TextureName name(CreateTextureName(hash, 0));
 	*pending = false;
@@ -477,7 +480,7 @@ GSTexture* GSTextureReplacements::LookupReplacementTexture(const GSTextureCache:
 }
 
 template <GSTexture::Format format>
-std::pair<u8, u8> GSTextureReplacements::GetBCAlphaMinMax(ReplacementTexture& rtex)
+GSAlphaMinMax GSTextureReplacements::GetBCAlphaMinMax(ReplacementTexture& rtex)
 {
 	constexpr u32 BC_BLOCK_SIZE = 4;
 	constexpr u32 BC_BLOCK_BYTES = (format == GSTexture::Format::BC1) ? 8 : 16;
@@ -523,7 +526,10 @@ std::pair<u8, u8> GSTextureReplacements::GetBCAlphaMinMax(ReplacementTexture& rt
 		}
 	}
 
-	return std::make_pair<u8, u8>(static_cast<u8>(minc.minv_u32() >> 24), static_cast<u8>(maxc.maxv_u32() >> 24));
+	GSAlphaMinMax r;
+	r.min = static_cast<u8>(minc.minv_u32() >> 24);
+	r.max = static_cast<u8>(maxc.maxv_u32() >> 24);
+	return r;
 }
 
 void GSTextureReplacements::SetReplacementTextureAlphaMinMax(ReplacementTexture& rtex)
