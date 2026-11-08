@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <memory>
 #include <new>
 #include <stddef.h>
 
@@ -698,9 +699,11 @@ private:
 	{
 		ReadBatch reads;
 		Target* target[DROP_BATCH_MAX];
-		/* Per channel and page of memory, the last draw of the newest
-		 * dropped target whose pixels of that channel go there, or -1. */
-		int page_draw[4][GS_MAX_PAGES];
+		/* Per channel and page of memory (channel * GS_MAX_PAGES + page),
+		 * the last draw of the newest dropped target whose pixels of that
+		 * channel go there, or -1. Heap, as 8 KiB is too much for the
+		 * stack frames that hold a batch. */
+		std::unique_ptr<int[]> page_draw;
 		u32 count;
 	};
 	void DropInit(DropBatch* d);

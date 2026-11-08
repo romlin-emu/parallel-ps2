@@ -7333,8 +7333,9 @@ void GSTextureCache::DropInit(DropBatch* d)
 	d->reads.count       = 0;
 	d->reads.shared_used = 0;
 	d->count             = 0;
+	d->page_draw.reset(new int[4 * GS_MAX_PAGES]);
 	for (i = 0; i < 4 * GS_MAX_PAGES; i++)
-		d->page_draw[i >> 9][i & (GS_MAX_PAGES - 1)] = -1;
+		d->page_draw[i] = -1;
 }
 
 /* The channels of the page (px, py) of t that go to local memory when t
@@ -7391,10 +7392,10 @@ u32 GSTextureCache::DropKeepsPage(DropBatch* d, const Target* t, int px, int py)
 		{
 			if (!(channels & (1u << c)))
 				continue;
-			if (d->page_draw[c][page] > t->m_last_draw || m_page_read_draw[c][page] > t->m_last_draw)
+			if (d->page_draw[c * GS_MAX_PAGES + page] > t->m_last_draw || m_page_read_draw[c][page] > t->m_last_draw)
 				channels &= ~(1u << c);
 			else
-				d->page_draw[c][page] = t->m_last_draw;
+				d->page_draw[c * GS_MAX_PAGES + page] = t->m_last_draw;
 		}
 	}
 	return channels;

@@ -838,7 +838,7 @@ Vulkan::ImageHandle PageTracker::find_cached_texture(Util::Hash hash) const
 
 void PageTracker::garbage_collect_texture_masked_handles(std::vector<CachedTextureMasked> &textures)
 {
-	__gnu_cxx::__normal_iterator<CachedTextureMasked *, std::vector<CachedTextureMasked>> itr = Util::unstable_remove_if(textures.begin(), textures.end(), [](const CachedTextureMasked &masked) {
+	std::vector<CachedTextureMasked>::iterator itr = Util::unstable_remove_if(textures.begin(), textures.end(), [](const CachedTextureMasked &masked) {
 		return masked.tex->status == CachedTexture::Status::Dead;
 	});
 	textures.erase(itr, textures.end());
@@ -850,7 +850,7 @@ bool PageTracker::invalidate_cached_textures(
 {
 	bool did_work = false;
 
-	__gnu_cxx::__normal_iterator<CachedTextureMasked *, std::vector<CachedTextureMasked>> itr = Util::unstable_remove_if(
+	std::vector<CachedTextureMasked>::iterator itr = Util::unstable_remove_if(
 			textures.begin(), textures.end(),
 			[this, block_mask, write_mask, clut_instance, &did_work](CachedTextureMasked &masked) {
 				CachedTexture &tex = *masked.tex;

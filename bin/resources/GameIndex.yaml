@@ -9632,7 +9632,6 @@ SCUS-97210:
 SCUS-97211:
   name: "ATV Offroad Fury 2"
   region: "NTSC-U"
-  gsHWFixes:
   compat: 5
 SCUS-97212:
   name: "My Street"
@@ -9749,7 +9748,6 @@ SCUS-97236:
 SCUS-97238:
   name: "ATV Offroad Fury 2 [Demo]"
   region: "NTSC-U"
-  gsHWFixes:
 SCUS-97239:
   name: "Jet X2O [Demo]"
   region: "NTSC-U"
@@ -10148,7 +10146,6 @@ SCUS-97368:
 SCUS-97369:
   name: "ATV Offroad Fury 2"
   region: "NTSC-U"
-  gsHWFixes:
   compat: 5
 SCUS-97370:
   name: "NCAA Final Four 2004"
@@ -10791,7 +10788,6 @@ SCUS-97509:
 SCUS-97510:
   name: "ATV Offroad Fury 2 [Greatest Hits]"
   region: "NTSC-U"
-  gsHWFixes:
 SCUS-97511:
   name: "SOCOM II - U.S. Navy SEALs [Greatest Hits]"
   region: "NTSC-U"
@@ -14202,15 +14198,12 @@ SLES-50809:
 SLES-50812:
   name: "Spider-Man"
   region: "PAL-E"
-  gsHWFixes:
 SLES-50813:
   name: "Spider-Man"
   region: "PAL-F"
-  gsHWFixes:
 SLES-50814:
   name: "Spider-Man"
   region: "PAL-G"
-  gsHWFixes:
   compat: 5
 SLES-50815:
   name: "Blood Omen 2 - The Legacy of Kain Series"
@@ -14641,7 +14634,6 @@ SLES-50964:
 SLES-50965:
   name: "Spider-Man"
   region: "PAL-S"
-  gsHWFixes:
 SLES-50972:
   name: "Barbarian"
   region: "PAL-M5"
@@ -15269,7 +15261,6 @@ SLES-51219:
 SLES-51220:
   name: "TY the Tasmanian Tiger"
   region: "PAL-M5"
-  gsHWFixes:
   compat: 5
 SLES-51222:
   name: "Rayman 3 - Hoodlum Havoc"
@@ -16520,7 +16511,6 @@ SLES-51813:
 SLES-51814:
   name: "ATV Offroad Fury 2"
   region: "PAL-E"
-  gsHWFixes:
 SLES-51815:
   name: "Final Fantasy X-2"
   region: "PAL-E"
@@ -25798,7 +25788,6 @@ SLES-54991:
 SLES-54992:
   name: "PDC World Championship Darts 2008"
   region: "PAL-M6"
-  gsHWFixes:
 SLES-54994:
   name: "Pippa Funnell - Ranch Rescue"
   region: "PAL-M11"
@@ -35792,7 +35781,6 @@ SLPM-65204:
 SLPM-65205:
   name: "Spider-Man"
   region: "NTSC-J"
-  gsHWFixes:
 SLPM-65206:
   name: "King of Colosseum - Green"
   region: "NTSC-J"
@@ -51862,7 +51850,6 @@ SLUS-20336:
   name: "Spider-Man"
   region: "NTSC-U"
   compat: 5
-  gsHWFixes:
 SLUS-20337:
   name: "X2 - Wolverine's Revenge"
   region: "NTSC-U"
@@ -53069,7 +53056,6 @@ SLUS-20570:
 SLUS-20571:
   name: "TY the Tasmanian Tiger"
   region: "NTSC-U"
-  gsHWFixes:
   compat: 5
 SLUS-20572:
   name: "Tiger Woods PGA Tour 2003"
@@ -59961,7 +59947,6 @@ SLUS-21773:
   name: "PDC World Championship Darts 2008"
   region: "NTSC-U"
   compat: 5
-  gsHWFixes:
 SLUS-21774:
   name: "Dynasty Warriors 6"
   region: "NTSC-U"
