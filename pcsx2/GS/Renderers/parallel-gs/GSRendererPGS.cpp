@@ -1004,7 +1004,7 @@ void GSRendererPGS::ReadFIFO(u8 *mem, u32 size)
  * reset, the CSR write or the unsynchronised local-memory read: this
  * renderer takes all of that from the GIF stream and its own copy of GS
  * memory. */
-extern std::unique_ptr<GSRendererPGS> g_pgs_renderer;
+extern GSRendererPGS* g_pgs_renderer;
 
 static void pgs_op_reset(bool hardware_reset)            { g_pgs_renderer->Reset(hardware_reset); }
 static void pgs_op_read_fifo(u8* mem, u32 size)          { g_pgs_renderer->ReadFIFO(mem, size); }
