@@ -990,6 +990,7 @@ namespace usb_mic
 			if (src)
 				src->Stop();
 		}
+		usb_desc_device_free(&s->desc_dev);
 		delete s;
 	}
 
@@ -1008,23 +1009,23 @@ namespace usb_mic
 		{
 			case MIC_SINGSTAR:
 				s->desc.str = singstar_desc_strings;
-				if (usb_desc_parse_dev(singstar_dev_descriptor, sizeof(singstar_dev_descriptor), s->desc, s->desc_dev) < 0)
+				if (usb_desc_parse_dev(singstar_dev_descriptor, sizeof(singstar_dev_descriptor), &s->desc, &s->desc_dev) < 0)
 					goto fail;
-				if (usb_desc_parse_config(singstar_config_descriptor, sizeof(singstar_config_descriptor), s->desc_dev) < 0)
+				if (usb_desc_parse_config(singstar_config_descriptor, sizeof(singstar_config_descriptor), &s->desc_dev) < 0)
 					goto fail;
 				break;
 			case MIC_LOGITECH:
 				s->desc.str = logitech_desc_strings;
-				if (usb_desc_parse_dev(logitech_dev_descriptor, sizeof(logitech_dev_descriptor), s->desc, s->desc_dev) < 0)
+				if (usb_desc_parse_dev(logitech_dev_descriptor, sizeof(logitech_dev_descriptor), &s->desc, &s->desc_dev) < 0)
 					goto fail;
-				if (usb_desc_parse_config(logitech_config_descriptor, sizeof(logitech_config_descriptor), s->desc_dev) < 0)
+				if (usb_desc_parse_config(logitech_config_descriptor, sizeof(logitech_config_descriptor), &s->desc_dev) < 0)
 					goto fail;
 				break;
 			case MIC_KONAMI:
 				s->desc.str = ak5370_desc_strings;
-				if (usb_desc_parse_dev(ak5370_dev_descriptor, sizeof(ak5370_dev_descriptor), s->desc, s->desc_dev) < 0)
+				if (usb_desc_parse_dev(ak5370_dev_descriptor, sizeof(ak5370_dev_descriptor), &s->desc, &s->desc_dev) < 0)
 					goto fail;
-				if (usb_desc_parse_config(ak5370_config_descriptor, sizeof(ak5370_config_descriptor), s->desc_dev) < 0)
+				if (usb_desc_parse_config(ak5370_config_descriptor, sizeof(ak5370_config_descriptor), &s->desc_dev) < 0)
 					goto fail;
 				break;
 			default:
@@ -1059,20 +1060,20 @@ namespace usb_mic
 		return nullptr;
 	}
 
-	USBDevice* usb_mic_create_singstar(u32 port)
+	static USBDevice* mic_create_singstar(u32 port)
 	{
 		return usb_mic_create(port, MIC_SINGSTAR);
 	}
 
-	void usb_mic_freeze(USBDevice* dev, UsbState& st)
+	static void mic_freeze(USBDevice* dev, UsbState* st)
 	{
 		SINGSTARMICState* s = USB_CONTAINER_OF(dev, SINGSTARMICState, dev);
-		st.Do(&s->f.intf);
-		st.Do(&s->f.mode);
-		st.Do(&s->f.mute);
-		st.Bytes(s->f.vol, sizeof(s->f.vol));
-		st.Bytes(s->f.srate, sizeof(s->f.srate));
-		if (!st.reading || st.error)
+		USB_STATE_DO(st, s->f.intf);
+		USB_STATE_DO(st, s->f.mode);
+		USB_STATE_DO(st, s->f.mute);
+		USB_STATE_DO(st, s->f.vol);
+		USB_STATE_DO(st, s->f.srate);
+		if (!st->reading || st->error)
 			return;
 		// The sources hold the rate and running state outside the frozen block.
 		for (int i = 0; i < 2; i++)
@@ -1087,3 +1088,13 @@ namespace usb_mic
 		}
 	}
 } // namespace usb_mic
+
+USBDevice* usb_mic_create_singstar(u32 port)
+{
+	return usb_mic::mic_create_singstar(port);
+}
+
+void usb_mic_freeze(USBDevice* dev, UsbState* st)
+{
+	usb_mic::mic_freeze(dev, st);
+}

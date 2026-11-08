@@ -1,13 +1,15 @@
-// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
-// SPDX-License-Identifier: GPL-3.0+
+/* SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team */
+/* SPDX-License-Identifier: GPL-3.0+ */
 
 #pragma once
 
 #include "USB/libretro-usb/qusb.h"
 #include "USB/libretro-usb/usb-state.h"
 
-namespace usb_buzz
-{
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 	/* A Buzz! receiver with four handsets, on the given OHCI port. */
 	USBDevice* usb_buzz_create(u32 port);
 
@@ -15,5 +17,8 @@ namespace usb_buzz
 	void usb_buzz_update(USBDevice* dev);
 
 	/* Saves or loads the last report sent, beyond what every USB device has. */
-	void usb_buzz_freeze(USBDevice* dev, UsbState& st);
-} // namespace usb_buzz
+	void usb_buzz_freeze(USBDevice* dev, UsbState* st);
+
+#ifdef __cplusplus
+}
+#endif

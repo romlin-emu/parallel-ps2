@@ -197,18 +197,19 @@ namespace usb_buzz
 	static void usb_buzz_unrealize(USBDevice* dev)
 	{
 		BuzzState* s = USB_CONTAINER_OF(dev, BuzzState, dev);
+		usb_desc_device_free(&s->desc_dev);
 		delete s;
 	}
 
-	USBDevice* usb_buzz_create(u32 port)
+	static USBDevice* buzz_create(u32 port)
 	{
 		BuzzState* s = new BuzzState();
 		s->desc.full = &s->desc_dev;
 		s->desc.str = desc_strings;
 
-		if (usb_desc_parse_dev(dev_descriptor, sizeof(dev_descriptor), s->desc, s->desc_dev) < 0)
+		if (usb_desc_parse_dev(dev_descriptor, sizeof(dev_descriptor), &s->desc, &s->desc_dev) < 0)
 			goto fail;
-		if (usb_desc_parse_config(config_descriptor, sizeof(config_descriptor), s->desc_dev) < 0)
+		if (usb_desc_parse_config(config_descriptor, sizeof(config_descriptor), &s->desc_dev) < 0)
 			goto fail;
 
 		s->dev.speed = USB_SPEED_FULL;
@@ -230,7 +231,7 @@ namespace usb_buzz
 		return nullptr;
 	}
 
-	void usb_buzz_update(USBDevice* dev)
+	static void buzz_update(USBDevice* dev)
 	{
 		BuzzState* s = USB_CONTAINER_OF(dev, BuzzState, dev);
 		s->buttons = 0;
@@ -238,9 +239,24 @@ namespace usb_buzz
 			s->buttons |= PADGetBuzzButtons(handset) << (USB_BUZZ_BUTTONS * handset);
 	}
 
-	void usb_buzz_freeze(USBDevice* dev, UsbState& st)
+	static void buzz_freeze(USBDevice* dev, UsbState* st)
 	{
 		BuzzState* s = USB_CONTAINER_OF(dev, BuzzState, dev);
-		st.Do(&s->sent);
+		USB_STATE_DO(st, s->sent);
 	}
 } // namespace usb_buzz
+
+USBDevice* usb_buzz_create(u32 port)
+{
+	return usb_buzz::buzz_create(port);
+}
+
+void usb_buzz_update(USBDevice* dev)
+{
+	usb_buzz::buzz_update(dev);
+}
+
+void usb_buzz_freeze(USBDevice* dev, UsbState* st)
+{
+	usb_buzz::buzz_freeze(dev, st);
+}

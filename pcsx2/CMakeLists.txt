@@ -827,17 +827,19 @@ if(PCAP)
 	target_link_libraries(PCSX2_FLAGS INTERFACE pcap)
 endif()
 set(pcsx2USBSources
-	USB/libretro-usb/bus.cpp
-	USB/libretro-usb/core.cpp
-	USB/libretro-usb/desc.cpp
-	USB/libretro-usb/hid.cpp
-	USB/libretro-usb/input-keymap-qcode-to-qnum.cpp
+	USB/libretro-usb/bus.c
+	USB/libretro-usb/core.c
+	USB/libretro-usb/desc.c
+	USB/libretro-usb/hid.c
+	USB/libretro-usb/input-keymap-qcode-to-qnum.c
 	USB/libretro-usb/usb-buzz.cpp
-	USB/libretro-usb/usb-hid.cpp
-	USB/libretro-usb/usb-ohci.cpp
+	USB/libretro-usb/usb-hid.c
+	USB/libretro-usb/usb-ohci.c
 	USB/libretro-usb/ohci_dma.c
 	USB/libretro-usb/ohci_dma.h
-	USB/shared/ringbuffer.cpp
+	USB/usb-python2/p2io.c
+	USB/usb-python2/py2desc.c
+	USB/usb-python2/usb-python2.c
 	USB/shared/sample-ring.cpp
 	USB/usb-eyetoy/cam-frame.cpp
 	USB/usb-eyetoy/cam-jpeg.cpp
@@ -859,7 +861,11 @@ set(pcsx2USBHeaders
 	USB/libretro-usb/usb-buzz.h
 	USB/libretro-usb/usb-hid.h
 	USB/libretro-usb/usb-state.h
-	USB/shared/ringbuffer.h
+	USB/usb-host.h
+	USB/usb-eyetoy/eyetoy.h
+	USB/usb-python2/p2io.h
+	USB/usb-python2/py2desc.h
+	USB/usb-python2/usb-python2.h
 	USB/shared/sample-ring.h
 	USB/usb-eyetoy/cam-frame.h
 	USB/usb-eyetoy/cam-jpeg.h
