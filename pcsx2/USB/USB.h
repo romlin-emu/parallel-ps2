@@ -65,6 +65,11 @@ enum
 };
 u32 PADGetBuzzButtons(unsigned handset);
 
+/* Perfect Pool's devices in place of the ports' own: its trackball on
+ * port 0 (the first pad's mouse and left stick), its camera on port 1.
+ * Takes effect at the next open or reset. */
+void USBSetPerfectPool(bool on);
+
 /* The device on a port, or NULL; for the harnesses under tests/. */
 struct USBDevice;
 struct USBDevice* USBGetPortDevice(unsigned port);

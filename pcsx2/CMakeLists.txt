@@ -841,6 +841,7 @@ set(pcsx2USBSources
 	USB/usb-python2/py2desc.c
 	USB/usb-python2/usb-python2.c
 	USB/shared/sample-ring.cpp
+	USB/usb-perfect-pool/ppcam.c
 	FireWire/fatimg.c
 	FireWire/p1io.c
 	FireWire/py1desc.c
@@ -870,6 +871,7 @@ set(pcsx2USBHeaders
 	USB/usb-python2/py2desc.h
 	USB/usb-python2/usb-python2.h
 	USB/shared/sample-ring.h
+	USB/usb-perfect-pool/ppcam.h
 	FireWire/fatimg.h
 	FireWire/fw_device.h
 	FireWire/p1io.h

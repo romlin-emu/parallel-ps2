@@ -24,6 +24,7 @@
 #include "../pcsx2/USB/usb-mic/usb-mic.h"
 #include "../pcsx2/USB/libretro-usb/usb-buzz.h"
 #include "../pcsx2/USB/usb-python2/usb-python2.h"
+#include "../pcsx2/USB/usb-perfect-pool/ppcam.h"
 #include "../pcsx2/USB/libretro-usb/desc.h"
 #include "../pcsx2/USB/libretro-usb/usb-state.h"
 
@@ -50,6 +51,10 @@ static int        s_camera_port    = -1;
 static int        s_accessory      = USB_ACCESSORY_NONE;
 static int        s_accessory_port = -1;
 static int        s_python2_port   = -1;
+/* Perfect Pool: its trackball on port 0, its camera on port 1. */
+static bool       s_ppool          = false;
+static int        s_ppcam_port     = -1;
+static int        s_trackball_port = -1;
 static USBDevice* s_usb_device[USB_NUM_PORTS]  = { NULL, NULL };
 
 
@@ -65,6 +70,11 @@ void USBSetPortDevice(unsigned port, int device, unsigned input_port)
 		s_port_device[port] = device;
 		s_input_port[port]  = input_port;
 	}
+}
+
+void USBSetPerfectPool(bool on)
+{
+	s_ppool = on;
 }
 
 static OHCIPort* GetOHCIPort(u32 port)
@@ -110,6 +120,19 @@ static void USBCreateDevice(u32 port)
 		}
 		return;
 	}
+	if (s_ppool)
+	{
+		dev = port == 0 ? usb_hid_create_trackball(port) : usb_ppcam_create();
+		if (dev)
+		{
+			USBAttachDevice(port, dev);
+			if (port == 0)
+				s_trackball_port = 0;
+			else
+				s_ppcam_port = (int)port;
+		}
+		return;
+	}
 	switch (s_port_device[port])
 	{
 		case USB_DEV_KEYBOARD:
@@ -146,7 +169,7 @@ static void USBCreateAccessory(void)
 	int port;
 
 	s_accessory_port = -1;
-	if (s_accessory == USB_ACCESSORY_NONE)
+	if (s_accessory == USB_ACCESSORY_NONE || s_ppool)
 		return;
 	port = USBFreePort(s_accessory == USB_ACCESSORY_BUZZ ? "Buzz! receiver" : "SingStar microphone");
 	if (port < 0)
@@ -166,7 +189,7 @@ static void USBCreateCamera(void)
 	int port;
 
 	s_camera_port = -1;
-	if (s_camera == USB_CAMERA_NONE)
+	if (s_camera == USB_CAMERA_NONE || s_ppool)
 		return;
 	port = USBFreePort("camera");
 	if (port < 0)
@@ -190,6 +213,10 @@ static void USBDestroyDevice(u32 port)
 	s_usb_device[port] = NULL;
 	if ((int)port == s_python2_port)
 		s_python2_port = -1;
+	if ((int)port == s_ppcam_port)
+		s_ppcam_port = -1;
+	if ((int)port == s_trackball_port)
+		s_trackball_port = -1;
 }
 
 /* What is attached to a port, for the savestate and the per-frame input. The
@@ -203,7 +230,9 @@ enum UsbStateKind
 	USB_KIND_CAPTURE_EYE,
 	USB_KIND_BUZZ,
 	USB_KIND_SINGSTAR,
-	USB_KIND_PYTHON2
+	USB_KIND_PYTHON2,
+	USB_KIND_TRACKBALL,
+	USB_KIND_PPCAM
 };
 
 static u32 USBPortKind(u32 port)
@@ -212,6 +241,10 @@ static u32 USBPortKind(u32 port)
 		return USB_KIND_NONE;
 	if ((int)port == s_python2_port)
 		return USB_KIND_PYTHON2;
+	if ((int)port == s_trackball_port)
+		return USB_KIND_TRACKBALL;
+	if ((int)port == s_ppcam_port)
+		return USB_KIND_PPCAM;
 	if ((int)port == s_accessory_port)
 		return s_accessory == USB_ACCESSORY_BUZZ ? USB_KIND_BUZZ : USB_KIND_SINGSTAR;
 	if ((int)port == s_camera_port)
@@ -311,6 +344,9 @@ void USBasync(u32 cycles)
 				case USB_KIND_MOUSE:
 					usb_hid_update(s_usb_device[port], input_cb, s_input_port[port]);
 					break;
+				case USB_KIND_TRACKBALL:
+					usb_hid_update(s_usb_device[port], input_cb, 0);
+					break;
 				case USB_KIND_PYTHON2:
 					usb_python2_update(s_usb_device[port], input_cb);
 					break;
@@ -348,12 +384,14 @@ void USBasync(u32 cycles)
 	}
 }
 
-/* The savestate block: the controller, a slot per port, then a footer of
- * size, version and magic. Fixed size, so retro_serialize_size does not
- * change with what is plugged in. */
+/* The savestate block: the controller, a slot per port, Perfect Pool's
+ * camera RAM when it is plugged in, then a footer of size, version and
+ * magic. Fixed for the session, so retro_serialize_size does not change
+ * with what the game does. */
 #define USB_STATE_OHCI    10240
 #define USB_STATE_SLOT    8192
-#define USB_STATE_SIZE    (USB_STATE_OHCI + USB_NUM_PORTS * USB_STATE_SLOT + 16)
+#define USB_STATE_EXTRA   (USB_STATE_OHCI + USB_NUM_PORTS * USB_STATE_SLOT)
+#define USB_STATE_SIZE    (USB_STATE_EXTRA + (s_ppool ? USB_PPCAM_RAM_SIZE : 0) + 16)
 #define USB_STATE_VERSION 1
 #define USB_STATE_MAGIC   "LRPS2USB"
 
@@ -453,7 +491,7 @@ static void USBFreezeDevice(USBDevice* dev, UsbState* st)
 		USBFreezeEndpoint(&dev->ep_out[i], st);
 }
 
-static void USBFreezePort(u32 port, u32 kind, UsbState* st)
+static void USBFreezePort(u32 port, u32 kind, UsbState* st, UsbState* extra)
 {
 	USBDevice* dev = s_usb_device[port];
 
@@ -466,6 +504,9 @@ static void USBFreezePort(u32 port, u32 kind, UsbState* st)
 		case USB_KIND_EYETOY:
 		case USB_KIND_CAPTURE_EYE:
 			usb_eyetoy_freeze(dev, st);
+			break;
+		case USB_KIND_PPCAM:
+			usb_ppcam_freeze(dev, st, extra);
 			break;
 		case USB_KIND_BUZZ:
 			usb_buzz_freeze(dev, st);
@@ -512,7 +553,7 @@ void USBStateWrite(void* dst)
 {
 	u8* p = (u8*)dst;
 	const u32 size = USB_STATE_SIZE, version = USB_STATE_VERSION;
-	UsbState st, slot;
+	UsbState st, slot, extra;
 	u32 port, kind;
 
 	memset(p, 0, USB_STATE_SIZE);
@@ -520,6 +561,7 @@ void USBStateWrite(void* dst)
 		return;
 
 	usb_state_init(&st, p, USB_STATE_OHCI, false);
+	usb_state_init(&extra, p + USB_STATE_EXTRA, USB_STATE_SIZE - 16 - USB_STATE_EXTRA, false);
 	USBFreezeOHCI(&st);
 	for (port = 0; port < USB_NUM_PORTS && !st.error; port++)
 	{
@@ -527,7 +569,7 @@ void USBStateWrite(void* dst)
 		kind = USBPortKind(port);
 		USB_STATE_DO(&slot, kind);
 		if (kind != USB_KIND_NONE)
-			USBFreezePort(port, kind, &slot);
+			USBFreezePort(port, kind, &slot, &extra);
 		st.error = slot.error;
 	}
 	if (st.error)
@@ -552,7 +594,7 @@ size_t USBStateStrip(const void* state, size_t size)
 void USBStateRead(const void* state, size_t size)
 {
 	const u8* p = USBStateFind(state, size);
-	UsbState st, slot;
+	UsbState st, slot, extra;
 	u32 port, kind;
 
 	if (!s_qemu_ohci)
@@ -565,6 +607,7 @@ void USBStateRead(const void* state, size_t size)
 
 	/* Read only: the cast is for the shared reader/writer. */
 	usb_state_init(&st, (u8*)p, USB_STATE_OHCI, true);
+	usb_state_init(&extra, (u8*)p + USB_STATE_EXTRA, USB_STATE_SIZE - 16 - USB_STATE_EXTRA, true);
 	USBFreezeOHCI(&st);
 	if (st.error || s_qemu_ohci->async_td)
 	{
@@ -587,7 +630,7 @@ void USBStateRead(const void* state, size_t size)
 		}
 		if (kind != USB_KIND_NONE)
 		{
-			USBFreezePort(port, kind, &slot);
+			USBFreezePort(port, kind, &slot, &extra);
 			/* A slot that ran short, or named a configuration or interface
 			 * the device does not have, leaves the device half loaded:
 			 * plugged in afresh instead. */
