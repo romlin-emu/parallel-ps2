@@ -22,7 +22,6 @@
 #include "common/General.h"
 #include "WorkEventCount.h"
 
-#include <functional>
 
 #include "GSVertexSW.h"
 #include "GSDrawScanline.h"
@@ -55,9 +54,11 @@ class GSJobQueue final
 private:
 	sthread_t* m_thread;
 	static void ThreadEntry(void* self) { static_cast<GSJobQueue*>(self)->ThreadProc(); }
-	std::function<void()> m_startup;
-	std::function<void(T&)> m_func;
-	std::function<void()> m_shutdown;
+	/* The worker's callbacks, with the context they are given. */
+	void (*m_startup)(void* context);
+	void (*m_func)(void* context, T& item);
+	void (*m_shutdown)(void* context);
+	void* m_context;
 	retro_atomic_int_t m_exit;
 	retro_spsc_t m_queue;
 	bool m_queue_ok;
@@ -67,7 +68,7 @@ private:
 	void ThreadProc()
 	{
 		if (m_startup)
-			m_startup();
+			m_startup(m_context);
 
 		for (;;)
 		{
@@ -91,7 +92,7 @@ private:
 					 * read side hands out const. */
 					T* item = reinterpret_cast<T*>(const_cast<u8*>(
 						static_cast<const u8*>(span_ptr) + consumed));
-					m_func(*item);
+					m_func(m_context, *item);
 					item->~T();
 					consumed += sizeof(T);
 				}
@@ -100,17 +101,21 @@ private:
 		}
 
 		if (m_shutdown)
-			m_shutdown();
+			m_shutdown(m_context);
 	}
 
 public:
-	GSJobQueue(std::function<void()> startup, std::function<void(T&)> func, std::function<void()> shutdown)
-		: m_startup(std::move(startup))
-		, m_func(std::move(func))
-		, m_shutdown(std::move(shutdown))
+	GSJobQueue(void (*startup)(void*), void (*func)(void*, T&), void (*shutdown)(void*), void* context)
+		: m_startup(startup)
+		, m_func(func)
+		, m_shutdown(shutdown)
+		, m_context(context)
 		, m_exit(RETRO_ATOMIC_INT_INITIALIZER(0))
 	{
-		work_eventcount_init(&m_sema);
+		/* Fed a job a draw by the GS thread and drained faster than
+		 * they come, the worker parks many times a frame: the
+		 * symmetric pair, where a park is a kernel wait and no more. */
+		work_eventcount_init_symmetric(&m_sema);
 		m_queue_ok = retro_spsc_init(&m_queue, (size_t)CAPACITY * sizeof(T));
 		if (!m_queue_ok)
 			log_cb(RETRO_LOG_ERROR, "GSJobQueue: ring allocation failed; jobs will run on the calling thread\n");
@@ -160,7 +165,7 @@ public:
 			 * failure: run the job synchronously rather than
 			 * dropping a draw. */
 			T local(item);
-			m_func(local);
+			m_func(m_context, local);
 			return;
 		}
 		while (retro_spsc_write_begin(&m_queue, &dst) < sizeof(T))
@@ -197,6 +202,11 @@ public:
 	u16* index;
 	int index_count;
 	u8 scanmsk_value;
+	/* Drawn by one thread, every row, in order, the others idle: a draw
+	 * whose frame or depth buffer wraps local memory, or which writes
+	 * one over the other, has rows far apart at one address, which the
+	 * threads' bands would write in no set order (GSRendererSW). */
+	bool whole;
 
 	GSScanlineGlobalData global;
 
@@ -214,6 +224,7 @@ public:
 		, index(NULL)
 		, index_count(0)
 		, scanmsk_value(0)
+		, whole(false)
 	{
 	}
 
@@ -232,6 +243,11 @@ protected:
 	int m_threads;
 	int m_thread_height;
 	u8* m_scanline;
+	/* m_scanline and m_threads for this thread's bands, and for every
+	 * row (DrawWhole) */
+	u8* m_scanline_own;
+	u8* m_scanline_all;
+	int m_threads_own;
 	u8 m_scanmsk_value;
 	GSVector4i m_scissor;
 	GSVector4 m_fscissor_x;
@@ -279,6 +295,9 @@ public:
 	__forceinline int FindMyNextScanline(int top) const;
 
 	void Draw(GSRasterizerData& data);
+	/* Every row of it, on the calling thread, while no other thread
+	 * draws (GSRasterizerData::whole). */
+	void DrawWhole(GSRasterizerData& data);
 };
 
 class IRasterizer : public GSVirtualAlignedClass<32>
@@ -315,21 +334,31 @@ protected:
 
 	GSDrawScanline m_ds;
 
-	// Worker threads depend on the rasterizers, so don't change the order.
-	std::vector<std::unique_ptr<GSRasterizer>> m_r;
-	std::vector<std::unique_ptr<GSWorker>> m_workers;
+	/* One rasterizer and one worker thread per slice; a worker draws on
+	 * its rasterizer, so the workers go first when the list is torn down. */
+	GSRasterizer** m_r;
+	GSWorker** m_workers;
+	u32 m_threads;
 	u8* m_scanline;
 	int m_thread_height;
 
 	GSRasterizerList(int threads);
 
-	static void OnWorkerStartup(int i, u64 affinity);
-	static void OnWorkerShutdown(int i);
+	/* A worker's context: its rasterizer and the CPU affinity it takes. */
+	struct Worker
+	{
+		GSRasterizer* r;
+		u64 affinity;
+	};
+	Worker* m_worker_ctx;
+	static void OnWorkerStartup(void* context);
+	static void OnWorkerDraw(void* context, GSRingHeap::SharedPtr<GSRasterizerData>& item);
 
 public:
 	~GSRasterizerList() override;
 
-	static std::unique_ptr<IRasterizer> Create(int threads);
+	/* A rasterizer on threads worker threads (none: a single one); the caller deletes it. */
+	static IRasterizer* Create(int threads);
 
 	// IRasterizer
 

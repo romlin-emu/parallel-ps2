@@ -93,14 +93,30 @@ typedef struct WorkEventCount
  * sleep/wake pair; 0 on single-core hosts. Defined in MTGS.cpp. */
 extern s32 WorkEventCount_SpinBudget(void);
 
-static INLINE void work_eventcount_init(WorkEventCount *w)
+static INLINE void work_eventcount_init_mode(WorkEventCount *w, int symmetric)
 {
-	retro_asym_eventcount_init(&w->work);
+	if (symmetric)
+		retro_asym_eventcount_init_symmetric(&w->work);
+	else
+		retro_asym_eventcount_init(&w->work);
 	retro_eventcount_init(&w->empty);
 	retro_atomic_store_relaxed_int(&w->state,
 			WORK_EVENTCOUNT_STATE(
 				retro_atomic_load_relaxed_int(&w->work.epoch), 1));
 	retro_atomic_store_relaxed_int(&w->dead, 0);
+}
+
+static INLINE void work_eventcount_init(WorkEventCount *w)
+{
+	work_eventcount_init_mode(w, 0);
+}
+
+/* The producer pays a locked increment a notify, and a park costs the
+ * worker no process-wide barrier: for a worker fed many small jobs
+ * that parks between them, by a producer that is not the EE. */
+static INLINE void work_eventcount_init_symmetric(WorkEventCount *w)
+{
+	work_eventcount_init_mode(w, 1);
 }
 
 static INLINE void work_eventcount_free(WorkEventCount *w)
@@ -227,6 +243,7 @@ static INLINE void work_eventcount_wait(WorkEventCount *w)
 
 static INLINE int work_eventcount_wait_timed(WorkEventCount *w, u32 timeout_ms)
 {
+	const s32 spin_budget = WorkEventCount_SpinBudget();
 	int epoch, key;
 
 	if (retro_atomic_load_acquire_int(&w->dead))
@@ -237,6 +254,24 @@ static INLINE int work_eventcount_wait_timed(WorkEventCount *w, u32 timeout_ms)
 		return work_eventcount_consume(w, epoch);
 
 	work_eventcount_go_idle(w, epoch);
+
+	/* The same bounded spin as work_eventcount_wait before the park:
+	 * the bound is for a wedged producer, and a park is the barrier
+	 * and a kernel sleep/wake pair for work that is a few packets
+	 * away. */
+	if (spin_budget)
+	{
+		s32 spins = spin_budget;
+		while (spins-- > 0)
+		{
+			epoch = retro_atomic_load_acquire_int(&w->work.epoch);
+			if (WORK_EVENTCOUNT_EPOCH_BITS(epoch) != work_eventcount_seen(w))
+				return work_eventcount_consume(w, epoch);
+			if (retro_atomic_load_relaxed_int(&w->dead))
+				return 1;
+			WORK_EVENTCOUNT_RELAX();
+		}
+	}
 
 	key = retro_asym_eventcount_prepare_wait(&w->work);
 	if (WORK_EVENTCOUNT_EPOCH_BITS(key) != work_eventcount_seen(w)

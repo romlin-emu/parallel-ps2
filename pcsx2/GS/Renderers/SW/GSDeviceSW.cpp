@@ -13,20 +13,19 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <algorithm>
 #include "common/Align.h"
 #include "common/Pcsx2Defs.h"
 #include <memalign.h>
-#include <cmath>
-#include <cstdint>
-#include <cstring>
-#include <memory>
+#include <math.h>
+#include <stdint.h>
+#include <string.h>
 
 #include <libretro.h>
 
 #include "common/VectorIntrin.h"
 #include "GS/GSExtra.h"
 #include "GS/Renderers/SW/GSDeviceSW.h"
+#include "GS/Renderers/Common/GSScratch.h"
 
 extern retro_environment_t    environ_cb;
 extern retro_video_refresh_t  video_cb;
@@ -1239,14 +1238,14 @@ static RenderAPI  sw_dev_get_render_api(const GSDevice* d) { return static_cast<
 static int        sw_dev_begin_present(GSDevice* d, bool frame_skip) { return static_cast<int>(SWDEV(d)->BeginPresent(frame_skip)); }
 static void       sw_dev_end_present(GSDevice* d) { SWDEV(d)->EndPresent(); }
 static GSTexture* sw_dev_create_surface(GSDevice* d, GSTexture::Type type, int w, int h, int levels, GSTexture::Format format) { return SWDEV(d)->CreateSurface(type, w, h, levels, format); }
-static GSDownloadTexture* sw_dev_create_download_texture(GSDevice* d, u32 w, u32 h, GSTexture::Format format) { return SWDEV(d)->CreateDownloadTexture(w, h, format).release(); }
+static GSDownloadTexture* sw_dev_create_download_texture(GSDevice* d, u32 w, u32 h, GSTexture::Format format) { return SWDEV(d)->CreateDownloadTexture(w, h, format); }
 static void       sw_dev_do_merge(GSDevice* d, GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, GSVector4* dRect, const GSRegPMODE* PMODE, const GSRegEXTBUF* EXTBUF, u32 c, bool linear) { SWDEV(d)->DoMerge(sTex, sRect, dTex, dRect, *PMODE, *EXTBUF, c, linear); }
 static void       sw_dev_do_interlace(GSDevice* d, GSTexture* sTex, const GSVector4* sRect, GSTexture* dTex, const GSVector4* dRect, ShaderInterlace shader, bool linear, const InterlaceConstantBuffer* cb) { SWDEV(d)->DoInterlace(sTex, *sRect, dTex, *dRect, shader, linear, *cb); }
 static void       sw_dev_copy_rect(GSDevice* d, GSTexture* sTex, GSTexture* dTex, const GSVector4i* r, u32 destX, u32 destY) { SWDEV(d)->CopyRect(sTex, dTex, *r, destX, destY); }
 static void       sw_dev_stretch_rect(GSDevice* d, GSTexture* sTex, const GSVector4* sRect, GSTexture* dTex, const GSVector4* dRect, ShaderConvert shader, bool linear) { SWDEV(d)->StretchRect(sTex, *sRect, dTex, *dRect, shader, linear); }
 static void       sw_dev_stretch_rect_mask(GSDevice* d, GSTexture* sTex, const GSVector4* sRect, GSTexture* dTex, const GSVector4* dRect, bool red, bool green, bool blue, bool alpha, ShaderConvert shader) { SWDEV(d)->StretchRect(sTex, *sRect, dTex, *dRect, red, green, blue, alpha, shader); }
 static void       sw_dev_present_rect(GSDevice* d, GSTexture* sTex, const GSVector4* sRect, GSTexture* dTex, const GSVector4* dRect) { SWDEV(d)->PresentRect(sTex, *sRect, dTex, *dRect); }
-static void       sw_dev_update_clut_texture(GSDevice* d, GSTexture* sTex, float sScale, u32 offsetX, u32 offsetY, GSTexture* dTex, u32 dOffset, u32 dSize, u32 samples) { SWDEV(d)->UpdateCLUTTexture(sTex, sScale, offsetX, offsetY, dTex, dOffset, dSize, samples); }
+static void       sw_dev_update_clut_texture(GSDevice* d, GSTexture* sTex, float sScale, float sSample, u32 offsetX, u32 offsetY, GSTexture* dTex, u32 dOffset, u32 dSize) { SWDEV(d)->UpdateCLUTTexture(sTex, sScale, sSample, offsetX, offsetY, dTex, dOffset, dSize); }
 static void       sw_dev_convert_to_indexed_texture(GSDevice* d, GSTexture* sTex, float sScale, u32 offsetX, u32 offsetY, u32 SBW, u32 SPSM, GSTexture* dTex, u32 DBW, u32 DPSM) { SWDEV(d)->ConvertToIndexedTexture(sTex, sScale, offsetX, offsetY, SBW, SPSM, dTex, DBW, DPSM); }
 static void       sw_dev_filtered_downsample_texture(GSDevice* d, GSTexture* sTex, GSTexture* dTex, u32 factor, const GSVector2i* clamp_min, const GSVector4* dRect) { SWDEV(d)->FilteredDownsampleTexture(sTex, dTex, factor, *clamp_min, *dRect); }
 static void       sw_dev_render_hw(GSDevice* d, GSHWDrawConfig* config) { SWDEV(d)->RenderHW(*config); }
@@ -1284,8 +1283,12 @@ GSDeviceSW::GSDeviceSW()
 	m_ops = &s_sw_device_ops;
 }
 
+/* MadFields' per-row working set, kept between frames (GSScratch.h). */
+static struct gs_scratch s_scratch_mad;
+
 GSDeviceSW::~GSDeviceSW()
 {
+	gs_scratch_free(&s_scratch_mad);
 	memalign_free(m_present_buffer);
 	m_present_buffer = NULL;
 }
@@ -1328,9 +1331,9 @@ GSTexture* GSDeviceSW::CreateSurface(GSTexture::Type type, int width, int height
 	return new GSTextureSW(type, width, height, format);
 }
 
-GSDownloadTexturePtr GSDeviceSW::CreateDownloadTexture(u32 width, u32 height, GSTexture::Format format)
+GSDownloadTexture* GSDeviceSW::CreateDownloadTexture(u32 width, u32 height, GSTexture::Format format)
 {
-	return GSDownloadTexturePtr(new GSDownloadTextureSW(width, height, format));
+	return new GSDownloadTextureSW(width, height, format);
 }
 
 void GSDeviceSW::DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, GSVector4* dRect,
@@ -1418,10 +1421,10 @@ void GSDeviceSW::DoInterlace(GSTexture* sTex, const GSVector4& /*sRect*/, GSText
 	 * GSDevice::Interlace casts ZrH.x to int and uses (idx & 1) as
 	 * the field. */
 	const int field   = static_cast<int>(cb.ZrH.x) & 1;
-	const int y_shift = static_cast<int>(std::floor(dRect.y + 0.5f));
+	const int y_shift = static_cast<int>(floorf(dRect.y + 0.5f));
 	/* A half-height field (FFMD) passes its block positive. */
 	const bool half_fields = cb.ZrH.w > 0.0f;
-	const int block = pcsx2_max_i(1, static_cast<int>(std::fabs(cb.ZrH.w) + 0.5f));
+	const int block = pcsx2_max_i(1, static_cast<int>(fabsf(cb.ZrH.w) + 0.5f));
 
 	const int src_w   = src->GetWidth();
 	const int src_h   = src->GetHeight();
@@ -1448,8 +1451,8 @@ void GSDeviceSW::DoInterlace(GSTexture* sTex, const GSVector4& /*sRect*/, GSText
 		{
 			/* A rect of another height than the source is a slot of the
 			 * adaptive buffer, which keeps the rest of it. */
-			const int dy0 = static_cast<int>(std::floor(dRect.y + 0.5f));
-			const int dy1 = static_cast<int>(std::floor(dRect.w + 0.5f));
+			const int dy0 = static_cast<int>(floorf(dRect.y + 0.5f));
+			const int dy1 = static_cast<int>(floorf(dRect.w + 0.5f));
 			if (dy1 - dy0 != src_h && dy1 > dy0)
 				BobScaled(src_buf, src_p, src_w, src_h,
 					dst_buf, dst_p, dst_w, dst_h, dy0, dy1);
@@ -1488,8 +1491,8 @@ void GSDeviceSW::DoInterlace(GSTexture* sTex, const GSVector4& /*sRect*/, GSText
 			const int idx_int = static_cast<int>(cb.ZrH.x);
 			const int bank    = (idx_int >> 1) & 1;
 			const int vres    = static_cast<int>(cb.ZrH.z) >> 1;
-			const int dy_begin = static_cast<int>(std::floor(dRect.y + 0.5f));
-			const int dy_end   = static_cast<int>(std::floor(dRect.w + 0.5f));
+			const int dy_begin = static_cast<int>(floorf(dRect.y + 0.5f));
+			const int dy_end   = static_cast<int>(floorf(dRect.w + 0.5f));
 
 			MadBuffer(src_buf, src_p, src_w, src_h,
 				dst_buf, dst_p, dst_w, dst_h,
@@ -1509,9 +1512,11 @@ void GSDeviceSW::DoInterlace(GSTexture* sTex, const GSVector4& /*sRect*/, GSText
 
 			if (half_fields)
 			{
-				std::vector<u8> scratch(static_cast<size_t>(pcsx2_min_i(src_w, dst_w)) * (4 * 8 + sizeof(float) * 7));
-				MadFields(src_buf, src_p, src_w, src_h,
-					dst_buf, dst_p, dst_w, dst_h, idx_int, block, scratch.data());
+				u8* scratch = static_cast<u8*>(gs_scratch_get(&s_scratch_mad,
+					static_cast<size_t>(pcsx2_min_i(src_w, dst_w)) * (4 * 8 + sizeof(float) * 7)));
+				if (scratch)
+					MadFields(src_buf, src_p, src_w, src_h,
+						dst_buf, dst_p, dst_w, dst_h, idx_int, block, scratch);
 			}
 			else
 			{
@@ -1697,8 +1702,8 @@ void GSDeviceSW::PresentRect(GSTexture* sTex, const GSVector4& sRect, GSTexture*
 	m_present_pending = true;
 }
 
-void GSDeviceSW::UpdateCLUTTexture(GSTexture* /*sTex*/, float /*sScale*/, u32 /*offsetX*/, u32 /*offsetY*/,
-	GSTexture* /*dTex*/, u32 /*dOffset*/, u32 /*dSize*/, u32 /*samples*/)
+void GSDeviceSW::UpdateCLUTTexture(GSTexture* /*sTex*/, float /*sScale*/, float /*sSample*/, u32 /*offsetX*/, u32 /*offsetY*/,
+	GSTexture* /*dTex*/, u32 /*dOffset*/, u32 /*dSize*/)
 {
 	/* HW-renderer-only path - the SW renderer doesn't call this. */
 }

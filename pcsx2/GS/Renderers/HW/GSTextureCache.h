@@ -15,14 +15,17 @@
 
 #pragma once
 
-#include <unordered_set>
-#include <utility> /* std::pair */
-#include <limits>
+#include <memory>
+#include <new>
+#include <stddef.h>
 
 #include "../Common/GSRenderer.h"
 #include "GSObjectPool.h"
 #include "../Common/GSFastList.h"
 #include "../Common/GSDirtyRect.h"
+#include "../Common/GSArray.h"
+#include "../Common/GSFlatMap.h"
+#include "../Common/GSStableMap.h"
 
 class GSHwHack;
 
@@ -112,9 +115,9 @@ public:
 		HashCacheKey WithRemovedCLUTHash() const;
 		void RemoveCLUTHash();
 
-		__fi bool operator==(const HashCacheKey& e) const { return std::memcmp(this, &e, sizeof(*this)) == 0; }
-		__fi bool operator!=(const HashCacheKey& e) const { return std::memcmp(this, &e, sizeof(*this)) != 0; }
-		__fi bool operator<(const HashCacheKey& e) const { return std::memcmp(this, &e, sizeof(*this)) < 0; }
+		__fi bool operator==(const HashCacheKey& e) const { return memcmp(this, &e, sizeof(*this)) == 0; }
+		__fi bool operator!=(const HashCacheKey& e) const { return memcmp(this, &e, sizeof(*this)) != 0; }
+		__fi bool operator<(const HashCacheKey& e) const { return memcmp(this, &e, sizeof(*this)) < 0; }
 	};
 
 	struct HashCacheKeyHash
@@ -127,12 +130,11 @@ public:
 		GSTexture* texture;
 		u32 refcount;
 		u16 age;
-		std::pair<u8, u8> alpha_minmax;
+		GSAlphaMinMax alpha_minmax;
 		bool valid_alpha_minmax;
 		bool is_replacement;
 	};
 
-	using HashCacheMap = std::unordered_map<HashCacheKey, HashCacheEntry, HashCacheKeyHash>;
 
 	class Surface : public GSAlignedClass<32>
 	{
@@ -220,14 +222,14 @@ public:
 		alignas(GS_OBJECT_POOL_ALIGN) u32 m_clut[256];
 		GSTexture* m_tex_palette;
 		u16 m_pal;
-		std::pair<u8, u8> m_alpha_minmax;
+		GSAlphaMinMax m_alpha_minmax;
 
 	public:
 		Palette(const u32* clut, u16 pal, bool need_gs_texture);
 		~Palette();
 
-		__fi std::pair<u8, u8> GetAlphaMinMax() const { return m_alpha_minmax; }
-		std::pair<u8, u8> GetAlphaMinMax(u8 min_index, u8 max_index) const;
+		__fi GSAlphaMinMax GetAlphaMinMax() const { return m_alpha_minmax; }
+		GSAlphaMinMax GetAlphaMinMax(u8 min_index, u8 max_index) const;
 
 		// Disable copy constructor and copy operator
 		Palette(const Palette&) = delete;
@@ -388,7 +390,7 @@ public:
 		bool m_scaled_indexed = false;
 		bool m_repeating = false;
 		bool m_valid_alpha_minmax = false;
-		std::pair<u8, u8> m_alpha_minmax = {0u, 255u};
+		GSAlphaMinMax m_alpha_minmax = {0u, 255u};
 		GSPage2TileMap* m_p2t = nullptr;
 		// Keep a trace of the target origin. There is no guarantee that pointer will
 		// still be valid on future. However it ought to be good when the source is created
@@ -401,6 +403,8 @@ public:
 		// Deliberately not initialized to save cycles.
 		u16 m_erase_it[GS_MAX_PAGES];
 		GSOffset::PageLooper m_pages;
+		/* Its place in SourceMap::m_surfaces. */
+		u32 m_surface_index = 0;
 
 	public:
 		/* Out of a pool fixed at startup, not the allocator: a source is
@@ -421,7 +425,7 @@ public:
 		__fi const SourceRegion& GetRegion() const { return m_region; }
 		__fi GSVector2i GetRegionSize() const { return m_region.GetSize(m_unscaled_size.x, m_unscaled_size.y); }
 		__fi GSVector4i GetRegionRect() const { return m_region.GetRect(m_unscaled_size.x, m_unscaled_size.y); }
-		__fi const std::pair<u8, u8> GetAlphaMinMax() const { return m_alpha_minmax; }
+		__fi GSAlphaMinMax GetAlphaMinMax() const { return m_alpha_minmax; }
 
 		void SetPages();
 
@@ -443,13 +447,14 @@ public:
 		 * the maps grow into what they need. */
 		static const u16 MAX_SIZE = 1024; // Max size of each map.
 
-		// Array of 2 maps, the first for 64B palettes and the second for 1024B palettes.
-		// Each map stores the key PaletteKey (clut copy, pal value) pointing to the relevant shared pointer to Palette object.
-		// There is one PaletteKey per Palette, and the hashing and comparison of PaletteKey is done with custom operators PaletteKeyHash and PaletteKeyEqual.
-		std::array<std::unordered_map<PaletteKey, Palette*, PaletteKeyHash, PaletteKeyEqual>, 2> m_maps;
+		/* Two GSStableMaps, the first for 16-entry palettes and the second
+		 * for 256: the CLUT's contents (64 or 1024 bytes, a copy in the
+		 * node, compared whole) -> Palette*. */
+		gs_stable_map_t m_maps[2];
 
 	public:
 		PaletteMap();
+		~PaletteMap();
 
 		// Retrieves a shared pointer to a valid Palette from m_maps or creates a new one adding it to the data structure
 		/* Both return a reference the caller owns and must Release. */
@@ -462,13 +467,23 @@ public:
 	class SourceMap
 	{
 	public:
-		std::unordered_set<Source*> m_surfaces;
-		std::array<FastList<Source*>, GS_MAX_PAGES> m_map;
+		/* Every source, in no order: m_surfaces[i] holds
+		 * m_surface_index i, and a source taken out has the last one
+		 * moved into its place, so a walk downwards may take out the
+		 * source it is at and go on. Room for as many as there have been
+		 * at once; grown, rarely, by doubling. */
+		Source** m_surfaces = nullptr;
+		u32 m_surfaces_count = 0;
+		u32 m_surfaces_capacity = 0;
+		FastList<Source*> m_map[GS_MAX_PAGES];
+
+		~SourceMap();
 
 		void Add(Source* s, const GIFRegTEX0& TEX0);
 		void SwapTexture(GSTexture* old_tex, GSTexture* new_tex);
 		void RemoveAll();
 		void RemoveAt(Source* s);
+		void Unlist(Source* s);
 	};
 
 	struct TargetHeightElem
@@ -501,7 +516,7 @@ public:
 
 	struct SurfaceOffsetKey
 	{
-		std::array<SurfaceOffsetKeyElem, 2> elems;  // A and B elems.
+		SurfaceOffsetKeyElem elems[2];  // A and B elems.
 	};
 
 	struct SurfaceOffset
@@ -510,21 +525,32 @@ public:
 		GSVector4i b2a_offset;  // B to A offset in B coords.
 	};
 
-	struct SurfaceOffsetKeyHash
-	{
-		std::size_t operator()(const SurfaceOffsetKey& key) const;
-	};
-
-	struct SurfaceOffsetKeyEqual
-	{
-		bool operator()(const SurfaceOffsetKey& lhs, const SurfaceOffsetKey& rhs) const;
-	};
-
 protected:
 	PaletteMap m_palette_map;
 	SourceMap m_src;
 	u64 m_source_memory_usage = 0;
-	HashCacheMap m_hash_cache;
+	/* HashCacheKey -> HashCacheEntry, in a GSStableMap: sources point at
+	 * their entries, which stay put. */
+	gs_stable_map_t m_hash_cache;
+	/* The palette each paletted texture in the hash cache was first
+	 * expanded with, by its key without one (HashCacheKey -> HashType),
+	 * in a GSFlatMap. An 8-bit texture expanded to 32 bits is four times
+	 * its size, sixteen for 4-bit, and one drawn with several palettes is
+	 * that once for each: Ridge Racer V's intro has 27 textures, 7 MB of
+	 * indices, as 370 MB of expansions. The second palette a texture is
+	 * seen with makes it an index texture, shared by every palette and
+	 * read through them on the GPU, as GPU palette conversion does for
+	 * all of them; a texture only ever drawn with one stays expanded.
+	 * Forgotten all at once when full: a texture drawn on is expanded
+	 * once more, and indexed at its next palette again. */
+	gs_flat_map_t m_palette_seen;
+	static constexpr size_t PALETTE_SEEN_MAX = 1024;
+	/* Where did this number come from? A game called Corvette draws its
+	 * background FMVs with a ton of 17x17 tiles, about 600 texture uploads
+	 * a frame; 800 is an upper bound with a bit of a buffer. What the hash
+	 * cache is purged down to each frame. */
+	static constexpr u32 MAX_HASH_CACHE_SIZE = 800;
+	bool m_auto_index = true;
 	u64 m_hash_cache_memory_usage = 0;
 	u64 m_hash_cache_replacement_memory_usage = 0;
 
@@ -590,7 +616,7 @@ private:
 		bool writes_alpha;
 	};
 	static constexpr size_t MAX_MOVE_REMAPS = 256;
-	std::vector<MoveRemap> m_move_remaps;
+	gs_array_t m_move_remaps; /* of MoveRemap */
 	u32 m_move_remap_clock = 0;
 
 	void ClearMoveRemaps();
@@ -603,13 +629,16 @@ private:
 	 * grows into what it needs, and 4096 is still far more than a frame
 	 * asks for. */
 	constexpr static size_t S_SURFACE_OFFSET_CACHE_MAX_SIZE = 4096;
-	std::unordered_map<SurfaceOffsetKey, SurfaceOffset, SurfaceOffsetKeyHash, SurfaceOffsetKeyEqual> m_surface_offset_cache;
+	/* SurfaceOffsetKey -> SurfaceOffset in a GSFlatMap, the key packed
+	 * into fourteen words (SurfaceOffsetCacheKey: the elements' psm, bp,
+	 * bw and rect, no padding to compare), the offset into five. */
+	gs_flat_map_t m_surface_offset_cache;
 
 	Source* m_temporary_source = nullptr; // invalidated after the draw
 
-	GSDownloadTexturePtr m_color_download_texture;
-	GSDownloadTexturePtr m_uint16_download_texture;
-	GSDownloadTexturePtr m_uint32_download_texture;
+	GSDownloadTexture* m_color_download_texture = nullptr;
+	GSDownloadTexture* m_uint16_download_texture = nullptr;
+	GSDownloadTexture* m_uint32_download_texture = nullptr;
 
 	Source* CreateSource(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, Target* t, bool half_right, int x_offset, int y_offset, const GSVector2i* lod, const GSVector4i* src_range, GSTexture* gpu_clut, SourceRegion region, int page_gather);
 	static int ReadEndX(u32 bw, u32 psm, const GSVector4i& r);
@@ -626,7 +655,7 @@ private:
 	void ScaleTargetForDisplay(Target* t, const GIFRegTEX0& dispfb, int real_w, int real_h);
 
 	/// Resizes the download texture if needed.
-	bool PrepareDownloadTexture(u32 width, u32 height, GSTexture::Format format, GSDownloadTexturePtr* tex, u32 extent_w = 0, u32 extent_h = 0);
+	bool PrepareDownloadTexture(u32 width, u32 height, GSTexture::Format format, GSDownloadTexture** tex, u32 extent_w = 0, u32 extent_h = 0);
 
 	/* A readback with its copy recorded and not yet waited for. */
 	struct PendingRead
@@ -636,12 +665,13 @@ private:
 		GSVector4i tr;
 		GSVector4i drc;
 		u32 write_mask;
+		int last_draw;
 	};
 
 	/* Records the copy of r back from t. With own given, a download
 	 * texture this cache holds is used the first time in shared_used
 	 * and own after that, so the copies of one batch do not share one. */
-	bool ReadQueue(Target* t, const GSVector4i& r, GSDownloadTexturePtr* own, u32* shared_used, PendingRead* out);
+	bool ReadQueue(Target* t, const GSVector4i& r, GSDownloadTexture** own, u32* shared_used, PendingRead* out, u32 channels = 0xf);
 	/* Waits for the copy, unless done, and writes it to local memory. */
 	bool ReadStore(const PendingRead& p);
 
@@ -658,16 +688,61 @@ private:
 		u32 count;
 		u32 shared_used;
 	};
-	GSDownloadTexturePtr m_read_batch_download[READ_BATCH_MAX];
-	bool ReadBatchQueue(ReadBatch* b, Target* t, const GSVector4i& r);
+	GSDownloadTexture* m_read_batch_download[READ_BATCH_MAX] = {};
+	bool ReadBatchQueue(ReadBatch* b, Target* t, const GSVector4i& r, u32 channels = 0xf);
 	void ReadBatchStore(ReadBatch* b);
+
+	/* Targets taken out of the lists, deleted once the pages of what they
+	 * drew that local memory lacks have been written there. */
+	enum { DROP_BATCH_MAX = 32 };
+	struct DropBatch
+	{
+		ReadBatch reads;
+		Target* target[DROP_BATCH_MAX];
+		/* Per channel and page of memory (channel * GS_MAX_PAGES + page),
+		 * the last draw of the newest dropped target whose pixels of that
+		 * channel go there, or -1. Heap, as 8 KiB is too much for the
+		 * stack frames that hold a batch. */
+		std::unique_ptr<int[]> page_draw;
+		u32 count;
+	};
+	void DropInit(DropBatch* d);
+	void DropQueue(DropBatch* d, Target* t);
+	void DropTarget(DropBatch* d, Target* t);
+	void DropFlush(DropBatch* d);
+	u32 DropKeepsPage(DropBatch* d, const Target* t, int px, int py);
+	/* Per channel and page of local memory, the last draw of the newest
+	 * target pixels a read put there, or -1: what a target dropped later,
+	 * holding older pixels of the page, must not write over. A read of a
+	 * target's RGB leaves the page's alpha to whoever holds it. */
+	int m_page_read_draw[4][GS_MAX_PAGES];
+	void ClearPageReadDraws();
+	void StampPageReadDraws(const GIFRegTEX0& TEX0, const GSVector4i& r, int draw, u32 channels);
+	/* The pages a savestate put into local memory that no target has
+	 * taken since: the first target made over any of them loads from
+	 * local memory, which holds what the GPU had. */
+	u32 m_restored_pages[GS_MAX_PAGES / 32];
+	bool TakeRestoredPages(u32 bp, u32 bw, u32 psm, const GSVector4i& r);
+
+	/* Targets dropped by age, out of the lists but keeping their textures:
+	 * what they drew goes to local memory only when something reads that
+	 * memory, the budget wants the room, or the cache is read back whole.
+	 * A write over their pages retires those pages instead. */
+	Target** m_parked = nullptr;
+	u32 m_parked_count = 0;
+	u32 m_parked_cap = 0;
+	void ParkTarget(Target* t);
+	void RetireParked(const GSOffset& off, const GSVector4i& r);
+	void DeleteParked();
 	void InvalidateLocalMemReads(const GSOffset& off, const GSVector4i& r, bool full_flush, ReadBatch* b);
 
 	HashCacheEntry* LookupHashCache(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, bool& paltex, const u32* clut, const GSVector2i* lod, SourceRegion region);
-	void RemoveFromHashCache(HashCacheMap::iterator it);
+	HashCacheEntry* FindHashCache(const HashCacheKey& key) const;
+	HashCacheEntry* InsertHashCache(const HashCacheKey& key, const HashCacheEntry& entry);
+	void RemoveFromHashCache(HashCacheEntry* e);
 	void AgeHashCache();
 
-	static void PreloadTexture(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, SourceRegion region, GSLocalMemory& mem, bool paltex, GSTexture* tex, u32 level, std::pair<u8, u8>* alpha_minmax);
+	static void PreloadTexture(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, SourceRegion region, GSLocalMemory& mem, bool paltex, GSTexture* tex, u32 level, GSAlphaMinMax* alpha_minmax);
 	static HashType HashTexture(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, SourceRegion region);
 
 	// TODO: virtual void Write(Source* s, const GSVector4i& r) = 0;
@@ -691,6 +766,8 @@ public:
 	void Read(Source* t, const GSVector4i& r);
 	void RemoveAll(bool sources, bool targets, bool hash_cache);
 	void ReadbackAll();
+	void MemRestored(const u32* changed);
+	void TargetsRestored();
 
 	/* Copies every target, on the GPU, under `key`. */
 	void SnapshotTargets(u64 key);
@@ -698,9 +775,19 @@ public:
 	 * cache holds (sources and targets, as RemoveAll); false, and nothing
 	 * changed, when there is no such snapshot. */
 	bool RestoreTargets(u64 key);
-	static void AddDirtyRectTarget(Target* target, GSVector4i rect, u32 psm, u32 bw, RGBAMask rgba, bool req_linear = false);
+	static void AddDirtyRectTarget(Target* target, GSVector4i rect, u32 psm, u32 bw, RGBAMask rgba);
 	void ResizeTarget(Target* t, GSVector4i rect, u32 tbp, u32 psm, u32 tbw);
-	bool RelayoutTarget(Target* t, u32 tbw);
+	/* Widens t to new_width within its buffer width, once: the width is
+	 * kept for the next target made there. The area gained loads from
+	 * local memory. */
+	bool WidenTarget(Target* t, int new_width);
+	/* from: a texture in the target's old layout the pages come from,
+	 * converted by shader; the target's own, copied, when NULL. */
+	bool RelayoutTargetWidth(Target* t, u32 new_tbw, int max_height, GSTexture* from = nullptr, ShaderConvert shader = ShaderConvert::COPY);
+	bool CopyTargetPagesInto(Target* t, Target* dst, const GSVector4i& draw_rect, bool keep_under_draw);
+	/* keep_none: the draw at the width keeps nothing of the target; with
+	 * draw_rect, the pages it covers at that width have nothing to move. */
+	bool RelayoutTarget(Target* t, u32 tbw, bool keep_none = false, const GSVector4i& draw_rect = GSVector4i::zero());
 	static bool FullRectDirty(Target* target, u32 rgba_mask);
 	static bool FullRectDirty(Target* target);
 	bool CanTranslate(u32 bp, u32 bw, u32 spsm, GSVector4i r, u32 dbp, u32 dpsm, u32 dbw);
@@ -708,7 +795,8 @@ public:
 	GSVector4i TranslateAlignedRectByPage(Target* t, u32 sbp, u32 spsm, u32 sbw, GSVector4i src_r, bool is_invalidation = false);
 	void DirtyRectByPage(u32 sbp, u32 spsm, u32 sbw, Target* t, GSVector4i src_r);
 	void DirtyRectByPageOld(u32 sbp, u32 spsm, u32 sbw, Target* t, GSVector4i src_r);
-	GSTexture* LookupPaletteSource(u32 CBP, u32 CPSM, u32 CBW, GSVector2i& offset, float* scale, const GSVector2i& size);
+	GSTexture* LookupPaletteSource(u32 CBP, u32 CPSM, u32 CBW, GSVector2i& offset, float* scale, float* sample, const GSVector2i& size);
+	static float NativeSample(const Target* t);
 	/* Makes sure a palette for this CLUT exists, with its GS texture if
 	 * asked for, and hands back the GS texture or NULL. The palette itself
 	 * stays with the map; the callers only ever wanted the texture. */
@@ -740,17 +828,26 @@ public:
 	Target* FindOverlappingTarget(GSTextureCache::Target* target) const;
 	Target* FindOverlappingTarget(u32 BP, u32 end_bp) const;
 	Target* FindOverlappingTarget(u32 BP, u32 BW, u32 PSM, GSVector4i rc) const;
+	/* The colour target holding memory a depth write lands in, when one does
+	 * and it was drawn after every depth buffer over that memory. */
+	Target* FindColourUnderDepthWrite(u32 zbp, u32 bw, u32 zpsm, const GSVector4i& r);
 
 	GSVector2i GetTargetSize(u32 bp, u32 fbw, u32 psm, s32 min_width, s32 min_height, bool can_expand = true);
-	bool HasTargetInHeightCache(u32 bp, u32 fbw, u32 psm, u32 max_age = std::numeric_limits<u32>::max(), bool move_front = true);
+	bool HasTargetInHeightCache(u32 bp, u32 fbw, u32 psm, u32 max_age = 0xFFFFFFFFu, bool move_front = true);
 	bool Has32BitTarget(u32 bp);
 
 	void InvalidateContainedTargets(u32 start_bp, u32 end_bp, u32 write_psm = PSMCT32);
 	void InvalidateVideoMemType(int type, u32 bp, u32 write_psm = PSMCT32, u32 write_fbmsk = 0, bool dirty_only = false,
 		const Target* keep = nullptr);
 	void InvalidateVideoMemSubTarget(GSTextureCache::Target* rt);
-	void InvalidateVideoMem(const GSOffset& off, const GSVector4i& r, bool target = true);
+	/* fbmsk: the frame mask of the draw doing the write, 0 for a write of
+	 * every bit; the sources it leaves untouched stay. */
+	void InvalidateVideoMem(const GSOffset& off, const GSVector4i& r, bool target = true, const Target* keep = nullptr, u32 fbmsk = 0);
 	void InvalidateLocalMem(const GSOffset& off, const GSVector4i& r, bool full_flush = false);
+	/* Before local memory in [bp, end_bp] is read: what parked targets drew
+	 * there, written to it. */
+	void FlushParked(u32 bp, u32 end_bp);
+	void FlushParkedRect(const GSOffset& off, const GSVector4i& r);
 
 	/// Removes any sources which point to the specified target.
 	void InvalidateSourcesFromTarget(const Target* t);
@@ -790,7 +887,7 @@ public:
 	void InvalidateTemporarySource();
 
 	/// Injects a texture into the hash cache, by using GSTexture::Swap(), transitively applying to all sources. Ownership of tex is transferred.
-	void InjectHashCacheTexture(const HashCacheKey& key, GSTexture* tex, const std::pair<u8, u8>& alpha_minmax);
+	void InjectHashCacheTexture(const HashCacheKey& key, GSTexture* tex, const GSAlphaMinMax& alpha_minmax);
 };
 
-extern std::unique_ptr<GSTextureCache> g_texture_cache;
+extern GSTextureCache* g_texture_cache;

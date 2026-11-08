@@ -16,8 +16,7 @@
 #include "GLStreamBuffer.h"
 #include <memalign.h>
 #include "common/Align.h"
-#include <array>
-#include <cstring>
+#include <string.h>
 
 GLStreamBuffer::GLStreamBuffer(GLenum target, GLuint buffer_id, u32 size)
 	: m_target(target)
@@ -71,7 +70,7 @@ namespace detail
 				return m_size;
 			}
 
-			static std::unique_ptr<GLStreamBuffer> Create(GLenum target, u32 size)
+			static GLStreamBuffer* Create(GLenum target, u32 size)
 			{
 				glGetError();
 
@@ -88,7 +87,7 @@ namespace detail
 					return {};
 				}
 
-				return std::unique_ptr<GLStreamBuffer>(new BufferSubDataStreamBuffer(target, buffer_id, size));
+				return new BufferSubDataStreamBuffer(target, buffer_id, size);
 			}
 
 		private:
@@ -129,7 +128,7 @@ namespace detail
 				return m_size;
 			}
 
-			static std::unique_ptr<GLStreamBuffer> Create(GLenum target, u32 size)
+			static GLStreamBuffer* Create(GLenum target, u32 size)
 			{
 				glGetError();
 
@@ -146,7 +145,7 @@ namespace detail
 					return {};
 				}
 
-				return std::unique_ptr<GLStreamBuffer>(new BufferDataStreamBuffer(target, buffer_id, size));
+				return new BufferDataStreamBuffer(target, buffer_id, size);
 			}
 
 		private:
@@ -240,7 +239,7 @@ enum : u32
        u32 m_used_block_index = 0;
        u32 m_available_block_index = NUM_SYNC_POINTS;
        u32 m_bytes_per_block;
-       std::array<GLsync, NUM_SYNC_POINTS> m_sync_objects{};
+       GLsync m_sync_objects[NUM_SYNC_POINTS] = {};
 	};
 
 	class BufferStorageStreamBuffer : public SyncingStreamBuffer
@@ -276,7 +275,7 @@ enum : u32
 				m_position += used_size;
 			}
 
-			static std::unique_ptr<GLStreamBuffer> Create(GLenum target, u32 size, bool coherent = true)
+			static GLStreamBuffer* Create(GLenum target, u32 size, bool coherent = true)
 			{
 				glGetError();
 
@@ -300,7 +299,7 @@ enum : u32
 				}
 
 				u8* mapped_ptr = static_cast<u8*>(glMapBufferRange(target, 0, size, map_flags));
-				return std::unique_ptr<GLStreamBuffer>(new BufferStorageStreamBuffer(target, buffer_id, size, mapped_ptr, coherent));
+				return new BufferStorageStreamBuffer(target, buffer_id, size, mapped_ptr, coherent);
 			}
 
 		private:
@@ -317,9 +316,9 @@ enum : u32
 
 } // namespace detail
 
-std::unique_ptr<GLStreamBuffer> GLStreamBuffer::Create(GLenum target, u32 size)
+GLStreamBuffer* GLStreamBuffer::Create(GLenum target, u32 size)
 {
-	std::unique_ptr<GLStreamBuffer> buf;
+	GLStreamBuffer* buf;
 	if (GLAD_GL_VERSION_4_4 || GLAD_GL_ARB_buffer_storage || GLAD_GL_EXT_buffer_storage)
 	{
 		buf = detail::BufferStorageStreamBuffer::Create(target, size);
@@ -329,7 +328,7 @@ std::unique_ptr<GLStreamBuffer> GLStreamBuffer::Create(GLenum target, u32 size)
 
 	// BufferSubData is slower on all drivers except NVIDIA...
 	const char* vendor = reinterpret_cast<const char*>(glGetString(GL_VENDOR));
-	if (std::strstr(vendor, "NVIDIA"))
+	if (strstr(vendor, "NVIDIA"))
 		return detail::BufferSubDataStreamBuffer::Create(target, size);
 	else
 		return detail::BufferDataStreamBuffer::Create(target, size);

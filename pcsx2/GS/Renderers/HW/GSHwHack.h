@@ -23,8 +23,6 @@ public:
 	static bool GSC_SacredBlaze(GSRendererHW& r, int& skip);
 	static bool GSC_SandGrainGames(GSRendererHW& r, int& skip);
 	static bool GSC_DTGames(GSRendererHW& r, int& skip);
-	static bool GSC_BurnoutGames(GSRendererHW& r, int& skip);
-	static bool GSC_BlackAndBurnoutSky(GSRendererHW& r, int& skip);
 	static bool GSC_MidnightClub3(GSRendererHW& r, int& skip);
 	static bool GSC_TalesOfLegendia(GSRendererHW& r, int& skip);
 	static bool GSC_UltramanFightingEvolution(GSRendererHW& r, int& skip);
@@ -37,12 +35,10 @@ public:
 	static bool GSC_MetalGearSolid3(GSRendererHW& r, int& skip);
 	static bool GSC_BigMuthaTruckers(GSRendererHW& r, int& skip);
 
-	static bool OI_PointListPalette(GSRendererHW& r, GSTexture* rt, GSTexture* ds, GSTextureCache::Source* t);
 	static bool OI_DBZBTGames(GSRendererHW& r, GSTexture* rt, GSTexture* ds, GSTextureCache::Source* t);
 	static bool OI_RozenMaidenGebetGarden(GSRendererHW& r, GSTexture* rt, GSTexture* ds, GSTextureCache::Source* t);
 	static bool OI_SonicUnleashed(GSRendererHW& r, GSTexture* rt, GSTexture* ds, GSTextureCache::Source* t);
 	static bool OI_ArTonelico2(GSRendererHW& r, GSTexture* rt, GSTexture* ds, GSTextureCache::Source* t);
-	static bool OI_BurnoutGames(GSRendererHW& r, GSTexture* rt, GSTexture* ds, GSTextureCache::Source* t);
 	static bool OI_Battlefield2(GSRendererHW& r, GSTexture* rt, GSTexture* ds, GSTextureCache::Source* t);
 
 	static bool MV_Growlanser(GSRendererHW& r);

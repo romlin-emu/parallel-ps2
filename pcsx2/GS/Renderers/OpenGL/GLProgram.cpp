@@ -13,18 +13,17 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <array>
-#include "../../../FormatString.h"
 #include "common/Pcsx2Defs.h"
-#include <fstream>
-#include <utility>
+#include <stdlib.h>
 
 #include "GLProgram.h"
 
 static u32 s_last_program_id = 0;
-static GLuint s_next_bad_shader_id = 1;
 
-GLProgram::GLProgram() = default;
+GLProgram::GLProgram()
+{
+	gs_array_init(&m_uniform_locations, sizeof(GLint));
+}
 
 GLProgram::GLProgram(GLProgram&& prog)
 {
@@ -34,56 +33,62 @@ GLProgram::GLProgram(GLProgram&& prog)
 	prog.m_vertex_shader_id   = 0;
 	m_fragment_shader_id      = prog.m_fragment_shader_id;
 	prog.m_fragment_shader_id = 0;
-	m_uniform_locations       = std::move(prog.m_uniform_locations);
+	m_uniform_locations       = prog.m_uniform_locations;
+	gs_array_init(&prog.m_uniform_locations, sizeof(GLint));
 }
 
 GLProgram::~GLProgram()
 {
 	Destroy();
+	gs_array_free(&m_uniform_locations);
 }
 
-GLuint GLProgram::CompileShader(GLenum type, const std::string_view source)
+/* The info log of shader or program object id, malloc'd, or NULL when
+ * there is none worth printing. */
+static char* GLProgramInfoLog(GLuint id, bool program)
+{
+	GLint info_log_length = 0;
+	char* info_log;
+	if (program)
+		glGetProgramiv(id, GL_INFO_LOG_LENGTH, &info_log_length);
+	else
+		glGetShaderiv(id, GL_INFO_LOG_LENGTH, &info_log_length);
+	// Log will create a new line when there are no warnings so let's set a minimum log length of 1.
+	if (info_log_length <= 1)
+		return nullptr;
+	info_log = static_cast<char*>(malloc(static_cast<size_t>(info_log_length) + 1));
+	if (!info_log)
+		return nullptr;
+	if (program)
+		glGetProgramInfoLog(id, info_log_length, &info_log_length, info_log);
+	else
+		glGetShaderInfoLog(id, info_log_length, &info_log_length, info_log);
+	info_log[info_log_length < 0 ? 0 : info_log_length] = 0;
+	return info_log;
+}
+
+GLuint GLProgram::CompileShader(GLenum type, const char* source, size_t length)
 {
 	GLuint id = glCreateShader(type);
 
-	std::array<const GLchar*, 1> sources = {{source.data()}};
-	std::array<GLint, 1> source_lengths = {{static_cast<GLint>(source.size())}};
-	glShaderSource(id, static_cast<GLsizei>(sources.size()), sources.data(), source_lengths.data());
+	const GLchar* sources[1] = {source};
+	GLint source_lengths[1] = {static_cast<GLint>(length)};
+	glShaderSource(id, 1, sources, source_lengths);
 	glCompileShader(id);
 
 	GLint status = GL_FALSE;
 	glGetShaderiv(id, GL_COMPILE_STATUS, &status);
 
-	GLint info_log_length = 0;
-	glGetShaderiv(id, GL_INFO_LOG_LENGTH, &info_log_length);
-
-	// Log will create a new line when there are no warnings so let's set a minimum log length of 1.
-	constexpr int info_log_min_length = 1;
-
-	if (status == GL_FALSE || info_log_length > info_log_min_length)
+	char* info_log = GLProgramInfoLog(id, false);
+	if (status == GL_FALSE || info_log)
 	{
-		std::string info_log;
-		info_log.resize(info_log_length + 1);
-		glGetShaderInfoLog(id, info_log_length, &info_log_length, &info_log[0]);
-
 		if (status == GL_TRUE)
-		{
-			log_cb(RETRO_LOG_WARN, "Shader compiled with warnings:\n%s\n", info_log.c_str());
-		}
+			log_cb(RETRO_LOG_WARN, "Shader compiled with warnings:\n%s\n", info_log);
 		else
+			log_cb(RETRO_LOG_ERROR, "Shader failed to compile:\n%s\n", info_log ? info_log : "");
+		free(info_log);
+		if (status == GL_FALSE)
 		{
-			log_cb(RETRO_LOG_ERROR, "Shader failed to compile:\n%s\n", info_log.c_str());
-
-			std::ofstream ofs(FormatString::Format("pcsx2_bad_shader_%u.txt", s_next_bad_shader_id++).c_str(),
-					std::ofstream::out | std::ofstream::binary);
-			if (ofs.is_open())
-			{
-				ofs.write(sources[0], source_lengths[0]);
-				ofs << "\n\nCompile failed, info log:\n";
-				ofs << info_log;
-				ofs.close();
-			}
-
 			glDeleteShader(id);
 			return 0;
 		}
@@ -97,18 +102,18 @@ void GLProgram::ResetLastProgram()
 	s_last_program_id = 0;
 }
 
-bool GLProgram::Compile(const std::string_view vertex_shader, const std::string_view fragment_shader)
+bool GLProgram::Compile(const char* vertex_shader, size_t vertex_length, const char* fragment_shader, size_t fragment_length)
 {
-	if (!vertex_shader.empty())
+	if (vertex_length)
 	{
-		m_vertex_shader_id = CompileShader(GL_VERTEX_SHADER, vertex_shader);
+		m_vertex_shader_id = CompileShader(GL_VERTEX_SHADER, vertex_shader, vertex_length);
 		if (m_vertex_shader_id == 0)
 			return false;
 	}
 
-	if (!fragment_shader.empty())
+	if (fragment_length)
 	{
-		m_fragment_shader_id = CompileShader(GL_FRAGMENT_SHADER, fragment_shader);
+		m_fragment_shader_id = CompileShader(GL_FRAGMENT_SHADER, fragment_shader, fragment_length);
 		if (m_fragment_shader_id == 0)
 			return false;
 	}
@@ -118,17 +123,6 @@ bool GLProgram::Compile(const std::string_view vertex_shader, const std::string_
 		glAttachShader(m_program_id, m_vertex_shader_id);
 	if (m_fragment_shader_id != 0)
 		glAttachShader(m_program_id, m_fragment_shader_id);
-	return true;
-}
-
-bool GLProgram::CompileCompute(const std::string_view glsl)
-{
-	GLuint id = CompileShader(GL_COMPUTE_SHADER, glsl);
-	if (id == 0)
-		return false;
-
-	m_program_id = glCreateProgram();
-	glAttachShader(m_program_id, id);
 	return true;
 }
 
@@ -150,7 +144,8 @@ bool GLProgram::CreateFromBinary(const void* data, u32 data_length, u32 data_for
 	return true;
 }
 
-bool GLProgram::GetBinary(std::vector<u8>* out_data, u32* out_data_format)
+/* The program's binary, into out_data (a byte array, grown as needed). */
+bool GLProgram::GetBinary(gs_array_t* out_data, u32* out_data_format)
 {
 	GLint binary_size = 0;
 	glGetProgramiv(m_program_id, GL_PROGRAM_BINARY_LENGTH, &binary_size);
@@ -161,17 +156,20 @@ bool GLProgram::GetBinary(std::vector<u8>* out_data, u32* out_data_format)
 	}
 
 	GLenum format = 0;
-	out_data->resize(static_cast<size_t>(binary_size));
-	glGetProgramBinary(m_program_id, binary_size, &binary_size, &format, out_data->data());
+	if (!gs_array_reserve(out_data, static_cast<size_t>(binary_size)))
+		return false;
+	out_data->count = static_cast<size_t>(binary_size);
+	glGetProgramBinary(m_program_id, binary_size, &binary_size, &format, out_data->items);
 	if (binary_size == 0)
 	{
 		log_cb(RETRO_LOG_WARN, "glGetProgramBinary() failed\n");
 		return false;
 	}
-	else if (static_cast<size_t>(binary_size) != out_data->size())
+	else if (static_cast<size_t>(binary_size) != out_data->count)
 	{
-		log_cb(RETRO_LOG_WARN, "Size changed from %zu to %d after glGetProgramBinary()\n", out_data->size(), binary_size);
-		out_data->resize(static_cast<size_t>(binary_size));
+		/* (never more than asked for: the driver got that much room) */
+		log_cb(RETRO_LOG_WARN, "Size changed from %zu to %d after glGetProgramBinary()\n", out_data->count, binary_size);
+		out_data->count = static_cast<size_t>(binary_size);
 	}
 
 	*out_data_format = static_cast<u32>(format);
@@ -231,26 +229,16 @@ bool GLProgram::Link()
 	GLint status = GL_FALSE;
 	glGetProgramiv(m_program_id, GL_LINK_STATUS, &status);
 
-	GLint info_log_length = 0;
-
-	// Log will create a new line when there are no warnings so let's set a minimum log length of 1.
-	constexpr int info_log_min_length = 1;
-
-	glGetProgramiv(m_program_id, GL_INFO_LOG_LENGTH, &info_log_length);
-
-	if (status == GL_FALSE || info_log_length > info_log_min_length)
+	char* info_log = GLProgramInfoLog(m_program_id, true);
+	if (status == GL_FALSE || info_log)
 	{
-		std::string info_log;
-		info_log.resize(info_log_length + 1);
-		glGetProgramInfoLog(m_program_id, info_log_length, &info_log_length, &info_log[0]);
-
 		if (status == GL_TRUE)
-		{
-			log_cb(RETRO_LOG_ERROR, "Program linked with warnings:\n%s\n", info_log.c_str());
-		}
+			log_cb(RETRO_LOG_ERROR, "Program linked with warnings:\n%s\n", info_log);
 		else
+			log_cb(RETRO_LOG_ERROR, "Program failed to link:\n%s\n", info_log ? info_log : "");
+		free(info_log);
+		if (status == GL_FALSE)
 		{
-			log_cb(RETRO_LOG_ERROR, "Program failed to link:\n%s\n", info_log.c_str());
 			glDeleteProgram(m_program_id);
 			m_program_id = 0;
 			return false;
@@ -287,180 +275,183 @@ void GLProgram::Destroy()
 		m_program_id = 0;
 	}
 
-	m_uniform_locations.clear();
+	m_uniform_locations.count = 0;
 }
 
 int GLProgram::RegisterUniform(const char* name)
 {
-	int id = static_cast<int>(m_uniform_locations.size());
-	m_uniform_locations.push_back(glGetUniformLocation(m_program_id, name));
+	const int id = static_cast<int>(m_uniform_locations.count);
+	GLint* slot = static_cast<GLint*>(gs_array_push(&m_uniform_locations));
+	if (!slot)
+		abort();
+	*slot = glGetUniformLocation(m_program_id, name);
 	return id;
 }
 
 void GLProgram::Uniform1ui(int index, u32 x) const
 {
-	const GLint location = m_uniform_locations[index];
+	const GLint location = GS_ARRAY_AT(&m_uniform_locations, GLint, index);
 	if (location >= 0)
 		glUniform1ui(location, x);
 }
 
 void GLProgram::Uniform2ui(int index, u32 x, u32 y) const
 {
-	const GLint location = m_uniform_locations[index];
+	const GLint location = GS_ARRAY_AT(&m_uniform_locations, GLint, index);
 	if (location >= 0)
 		glUniform2ui(location, x, y);
 }
 
 void GLProgram::Uniform3ui(int index, u32 x, u32 y, u32 z) const
 {
-	const GLint location = m_uniform_locations[index];
+	const GLint location = GS_ARRAY_AT(&m_uniform_locations, GLint, index);
 	if (location >= 0)
 		glUniform3ui(location, x, y, z);
 }
 
 void GLProgram::Uniform4ui(int index, u32 x, u32 y, u32 z, u32 w) const
 {
-	const GLint location = m_uniform_locations[index];
+	const GLint location = GS_ARRAY_AT(&m_uniform_locations, GLint, index);
 	if (location >= 0)
 		glUniform4ui(location, x, y, z, w);
 }
 
 void GLProgram::Uniform1i(int index, s32 x) const
 {
-	const GLint location = m_uniform_locations[index];
+	const GLint location = GS_ARRAY_AT(&m_uniform_locations, GLint, index);
 	if (location >= 0)
 		glUniform1i(location, x);
 }
 
 void GLProgram::Uniform2i(int index, s32 x, s32 y) const
 {
-	const GLint location = m_uniform_locations[index];
+	const GLint location = GS_ARRAY_AT(&m_uniform_locations, GLint, index);
 	if (location >= 0)
 		glUniform2i(location, x, y);
 }
 
 void GLProgram::Uniform3i(int index, s32 x, s32 y, s32 z) const
 {
-	const GLint location = m_uniform_locations[index];
+	const GLint location = GS_ARRAY_AT(&m_uniform_locations, GLint, index);
 	if (location >= 0)
 		glUniform3i(location, x, y, z);
 }
 
 void GLProgram::Uniform4i(int index, s32 x, s32 y, s32 z, s32 w) const
 {
-	const GLint location = m_uniform_locations[index];
+	const GLint location = GS_ARRAY_AT(&m_uniform_locations, GLint, index);
 	if (location >= 0)
 		glUniform4i(location, x, y, z, w);
 }
 
 void GLProgram::Uniform1f(int index, float x) const
 {
-	const GLint location = m_uniform_locations[index];
+	const GLint location = GS_ARRAY_AT(&m_uniform_locations, GLint, index);
 	if (location >= 0)
 		glUniform1f(location, x);
 }
 
 void GLProgram::Uniform2f(int index, float x, float y) const
 {
-	const GLint location = m_uniform_locations[index];
+	const GLint location = GS_ARRAY_AT(&m_uniform_locations, GLint, index);
 	if (location >= 0)
 		glUniform2f(location, x, y);
 }
 
 void GLProgram::Uniform3f(int index, float x, float y, float z) const
 {
-	const GLint location = m_uniform_locations[index];
+	const GLint location = GS_ARRAY_AT(&m_uniform_locations, GLint, index);
 	if (location >= 0)
 		glUniform3f(location, x, y, z);
 }
 
 void GLProgram::Uniform4f(int index, float x, float y, float z, float w) const
 {
-	const GLint location = m_uniform_locations[index];
+	const GLint location = GS_ARRAY_AT(&m_uniform_locations, GLint, index);
 	if (location >= 0)
 		glUniform4f(location, x, y, z, w);
 }
 
 void GLProgram::Uniform2uiv(int index, const u32* v) const
 {
-	const GLint location = m_uniform_locations[index];
+	const GLint location = GS_ARRAY_AT(&m_uniform_locations, GLint, index);
 	if (location >= 0)
 		glUniform2uiv(location, 1, v);
 }
 
 void GLProgram::Uniform3uiv(int index, const u32* v) const
 {
-	const GLint location = m_uniform_locations[index];
+	const GLint location = GS_ARRAY_AT(&m_uniform_locations, GLint, index);
 	if (location >= 0)
 		glUniform3uiv(location, 1, v);
 }
 
 void GLProgram::Uniform4uiv(int index, const u32* v) const
 {
-	const GLint location = m_uniform_locations[index];
+	const GLint location = GS_ARRAY_AT(&m_uniform_locations, GLint, index);
 	if (location >= 0)
 		glUniform4uiv(location, 1, v);
 }
 
 void GLProgram::Uniform2iv(int index, const s32* v) const
 {
-	const GLint location = m_uniform_locations[index];
+	const GLint location = GS_ARRAY_AT(&m_uniform_locations, GLint, index);
 	if (location >= 0)
 		glUniform2iv(location, 1, v);
 }
 
 void GLProgram::Uniform3iv(int index, const s32* v) const
 {
-	const GLint location = m_uniform_locations[index];
+	const GLint location = GS_ARRAY_AT(&m_uniform_locations, GLint, index);
 	if (location >= 0)
 		glUniform3iv(location, 1, v);
 }
 
 void GLProgram::Uniform4iv(int index, const s32* v) const
 {
-	const GLint location = m_uniform_locations[index];
+	const GLint location = GS_ARRAY_AT(&m_uniform_locations, GLint, index);
 	if (location >= 0)
 		glUniform4iv(location, 1, v);
 }
 
 void GLProgram::Uniform2fv(int index, const float* v) const
 {
-	const GLint location = m_uniform_locations[index];
+	const GLint location = GS_ARRAY_AT(&m_uniform_locations, GLint, index);
 	if (location >= 0)
 		glUniform2fv(location, 1, v);
 }
 
 void GLProgram::Uniform3fv(int index, const float* v) const
 {
-	const GLint location = m_uniform_locations[index];
+	const GLint location = GS_ARRAY_AT(&m_uniform_locations, GLint, index);
 	if (location >= 0)
 		glUniform3fv(location, 1, v);
 }
 
 void GLProgram::Uniform4fv(int index, const float* v) const
 {
-	const GLint location = m_uniform_locations[index];
+	const GLint location = GS_ARRAY_AT(&m_uniform_locations, GLint, index);
 	if (location >= 0)
 		glUniform4fv(location, 1, v);
 }
 
 void GLProgram::UniformMatrix2fv(int index, const float* v)
 {
-	const GLint location = m_uniform_locations[index];
+	const GLint location = GS_ARRAY_AT(&m_uniform_locations, GLint, index);
 	if (location >= 0)
 		glUniformMatrix2fv(location, 1, GL_FALSE, v);
 }
 
 void GLProgram::UniformMatrix3fv(int index, const float* v)
 {
-	const GLint location = m_uniform_locations[index];
+	const GLint location = GS_ARRAY_AT(&m_uniform_locations, GLint, index);
 	if (location >= 0)
 		glUniformMatrix3fv(location, 1, GL_FALSE, v);
 }
 
 void GLProgram::UniformMatrix4fv(int index, const float* v)
 {
-	const GLint location = m_uniform_locations[index];
+	const GLint location = GS_ARRAY_AT(&m_uniform_locations, GLint, index);
 	if (location >= 0)
 		glUniformMatrix4fv(location, 1, GL_FALSE, v);
 }
@@ -481,6 +472,8 @@ GLProgram& GLProgram::operator=(GLProgram&& prog)
 	prog.m_vertex_shader_id = 0;
 	m_fragment_shader_id = prog.m_fragment_shader_id;
 	prog.m_fragment_shader_id = 0;
-	m_uniform_locations = std::move(prog.m_uniform_locations);
+	gs_array_free(&m_uniform_locations);
+	m_uniform_locations = prog.m_uniform_locations;
+	gs_array_init(&prog.m_uniform_locations, sizeof(GLint));
 	return *this;
 }

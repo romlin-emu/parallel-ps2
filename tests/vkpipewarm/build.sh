@@ -27,13 +27,25 @@
 #    sibling), and each from nothing drawing every new key with its
 #    sibling while the warm-up thread builds its own (=async), presents
 #    the same picture as from nothing; the second ends in the same state,
-#    and its pipelines come from the thread while siblings drew;
-#  - with graphics pipeline libraries (and the dynamic blend), a key whose
-#    sibling's pixel shader part is there draws with a sibling linked from
-#    it, nothing built on the render thread, and from nothing no more is
-#    built there than without them; without either (LRPS2_TEST_VK_NO_GPL,
-#    _NO_EDS3) every pipeline is built whole as before; the picture is the
-#    same every way.
+#    and its pipelines come from the thread while siblings drew; and
+#    with every other key drawn with its sibling and the rest with their
+#    own (=mixed), in every frame, as the thread's arrival makes them now
+#    and then, each case presents the picture pipelines of their own do
+#    (=sync): a sibling drawn after a utility draw's push constants and
+#    then a pipeline of its own reads its own key, pushed again
+#    (sibling_key_after_clut);
+#  - with graphics pipeline libraries, a key whose sibling's pixel shader
+#    part is there draws with a sibling linked from it, nothing built on
+#    the render thread, and from nothing no more is built there than
+#    without them; without them (LRPS2_TEST_VK_NO_GPL) every pipeline is
+#    built whole as before; the picture is the same every way - which
+#    holds the pixel shader part of a sibling that blends with its second
+#    output (dual_blend: (Cs - Cd) * As + Cd, As none of Cs's channels)
+#    to having it: built from a key with no blend, it was once built
+#    without, and the linked sibling read what the shader never wrote
+#    (lavapipe shows the same picture either way; a driver need not);
+#  - no run asks the device for VK_EXT_extended_dynamic_state3: with the
+#    blend set on the command buffer NVIDIA's driver drew nothing.
 #
 # Runs the built core: pcsx2_libretro.so/.dll/.dylib at the top of the
 # tree, or LRPS2_CORE. Without one, or without a Vulkan device, the
@@ -70,8 +82,12 @@ if [ ! -f "$CORE" ]; then
 	exit 0
 fi
 
-CASES="dest_alpha mip_tw8 points aa1_line depth_states"
-for c in $CASES; do
+CASES="dest_alpha mip_tw8 points aa1_line dual_blend depth_states"
+# (step 5's too, drawn with siblings and pipelines of their own mixed:
+# with more than one key, and frames with a utility draw's push constants
+# between a sibling's draws)
+MIXED_CASES="sibling_key_after_clut clut_lines"
+for c in $CASES $MIXED_CASES; do
 	"$WORK/swdraw$EXE" --bios "$WORK/$c.bin" $c >/dev/null
 done
 
@@ -278,6 +294,30 @@ done
 # them, some must)
 [ "$landed" -gt 0 ] || { echo "  FAIL: no pipeline built while a sibling drew came back from the thread"; fail=1; }
 
+# Every other key drawn with its sibling, the rest with pipelines of
+# their own, each frame (=mixed): the picture every pipeline of its own
+# draws (=sync), in the cases of the list's that draw with more than one
+# key, and the ones whose frames put a utility draw's push constants
+# between a sibling's draws.
+for c in dest_alpha mip_tw8 depth_states $MIXED_CASES; do
+	for mode in sync mixed; do
+		rm -rf "$WORK/$mode"
+		mkdir -p "$WORK/$mode"
+		LRPS2_TEST_VK_PIPELINES=$mode run "$c.$mode" $c "$WORK/$mode"
+	done
+	a=$(image "$c.sync"); b=$(image "$c.mixed")
+	d=$(sed -n 's/.*Vulkan dynamic siblings: .*, \([0-9]*\) draws drawn with one.*/\1/p' "$WORK/$c.mixed.log")
+	if [ -z "$a" ] || [ "$a" != "$b" ]; then
+		echo "  FAIL: $c drawn with siblings and pipelines of their own mixed presents another picture (${a:-none}, ${b:-none})"
+		fail=1
+	elif [ "${d:-0}" = 0 ]; then
+		echo "  FAIL: $c drew nothing with a sibling (mixed)"
+		fail=1
+	else
+		printf '  %s mixed: the same picture; %s draws drawn with a sibling\n' $c "$d"
+	fi
+done
+
 # 6. Where the device has graphics pipeline libraries (lavapipe does):
 #  - from nothing, a key whose sibling's pixel shader part is not built yet
 #    is built whole on the render thread as without them, and the part is
@@ -287,8 +327,8 @@ done
 #    at once with a sibling linked from them while the thread builds its
 #    own: none is built on the render thread;
 #  - the picture is the same either way.
-# 7. Where it has neither the libraries nor the dynamic blend, every
-# pipeline is built whole as before them, and the picture is the same too.
+# 7. Without the libraries, every pipeline is built whole as before them,
+# and the picture is the same too.
 linked=0
 for c in $CASES; do
 	rm -rf "$WORK/libs" "$WORK/whole"
@@ -297,7 +337,7 @@ for c in $CASES; do
 	grep -q "Graphics pipeline libraries are in use" "$WORK/$c.libs.log" || { echo "  skip: no graphics pipeline libraries on this device"; break; }
 	rm -f "$WORK/libs/pcsx2/cache/vulkan_pipelines.bin"
 	RUN_ENV=LRPS2_TEST_VK_WARM_LIBS_ONLY=1 run "$c.linked" $c "$WORK/libs"
-	RUN_ENV="LRPS2_TEST_VK_NO_GPL=1 LRPS2_TEST_VK_NO_EDS3=1" run "$c.whole" $c "$WORK/whole"
+	RUN_ENV=LRPS2_TEST_VK_NO_GPL=1 run "$c.whole" $c "$WORK/whole"
 	a=$(image "$c.cold")
 	for r in libs linked whole; do
 		b=$(image "$c.$r")
@@ -311,10 +351,19 @@ for c in $CASES; do
 		{ echo "  FAIL: $c built $(here "$c.libs") on the render thread from nothing with libraries, $(here "$c.whole") without"; fail=1; }
 	[ "$(here "$c.linked")" = 0 ] || { echo "  FAIL: $c built $(here "$c.linked") on the render thread with libraries to link from"; fail=1; }
 	[ "${l:-0}" -gt 0 ] || { echo "  FAIL: $c linked no sibling from its libraries"; fail=1; }
-	grep -q "Extended dynamic state 3 (blend) is NOT in use" "$WORK/$c.whole.log" || { echo "  FAIL: $c: the dynamic blend was not left off"; fail=1; }
+	grep -q "Graphics pipeline libraries are NOT in use" "$WORK/$c.whole.log" || { echo "  FAIL: $c: the libraries were not left off"; fail=1; }
 	printf '  %s: from nothing %s built on the render thread, %s without libraries; with the libraries %s siblings linked, none built (longest frame %s)\n' \
 		$c "$(here "$c.libs")" "$(here "$c.whole")" "${l:-0}" "$(longest "$c.linked")"
 done
+
+# 8. No run asked the device for VK_EXT_extended_dynamic_state3: the blend
+# set on the command buffer drew nothing on NVIDIA's driver (Devil May Cry
+# 3 black, Soulcalibur III's picture frozen), whatever else was on or off,
+# and a device that offers it (lavapipe does) is not to take it up again.
+if grep -l "Enabling extension: VK_EXT_extended_dynamic_state3" "$WORK"/*.log >/dev/null 2>&1; then
+	echo "  FAIL: a run enabled VK_EXT_extended_dynamic_state3 (the blend on the command buffer: NVIDIA draws nothing with it)"
+	fail=1
+fi
 
 [ $fail = 0 ] || exit 1
 echo "vkpipewarm: ok"

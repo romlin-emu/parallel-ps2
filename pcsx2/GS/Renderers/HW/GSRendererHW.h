@@ -105,6 +105,8 @@ private:
 	void ClearGSLocalMemory(const GSOffset& off, const GSVector4i& r, u32 vert_color);
 	bool DetectDoubleHalfClear(bool& no_rt, bool& no_ds);
 	bool DetectStripedDoubleClear(bool& no_rt, bool& no_ds);
+	bool WriteDepthIntoColourMemory(bool no_rt, bool& no_ds);
+	bool FillDepthWriteIntoTarget(GSTextureCache::Target* rt, const GSVector4i& r, u32 zval);
 	bool DetectRedundantBufferClear(bool& no_rt, bool& no_ds, u32 fm_mask);
 	bool TryTargetClear(GSTextureCache::Target* rt, GSTextureCache::Target* ds, bool preserve_rt_color, bool preserve_depth);
 	void SetNewFRAME(u32 bp, u32 bw, u32 psm);
@@ -161,12 +163,20 @@ private:
 	void CleanupDraw(bool invalidate_temp_src);
 
 	void EmulateTextureSampler(const GSTextureCache::Target* rt, const GSTextureCache::Target* ds,
-			GSTextureCache::Source* tex, const TextureMinMaxResult& tmm, GSDevice::RecycledTexture& src_copy);
+			GSTextureCache::Source* tex, const TextureMinMaxResult& tmm, GSTexture*& src_copy);
 	void HandleTextureHazards(const GSTextureCache::Target* rt, const GSTextureCache::Target* ds,
 		const GSTextureCache::Source* tex, const TextureMinMaxResult& tmm, GSTextureCache::SourceRegion& source_region,
-		bool& target_region, GSVector2i& unscaled_size, float& scale, GSDevice::RecycledTexture& src_copy);
+		bool& target_region, GSVector2i& unscaled_size, float& scale, GSTexture*& src_copy);
 	bool CanUseTexIsFB(const GSTextureCache::Target* rt, const GSTextureCache::Source* tex,
 		const TextureMinMaxResult& tmm);
+
+	/* An auto-flushed batch drawn at once (GSState's segments): which
+	 * batches can be, and the draw of one as a run per segment, the copy
+	 * of the target it reads refreshed for each run's texels in turn. */
+	void RenderRuns();
+	bool RenderRunsInPlace();
+	bool CopyWholeTargetForRuns();
+	void RefreshRunsCopy(u32 vmin, u32 vmax);
 
 	void EmulateZbuffer(const GSTextureCache::Target* ds);
 	void EmulateATST(float& AREF, GSHWDrawConfig::PSSelector& ps, bool pass_2);
@@ -358,12 +368,41 @@ private:
 	GSVector2i m_lod = {}; // Min & Max level of detail
 
 	GSHWDrawConfig m_conf = {};
+	/* The copy of the render target the draw reads (HandleTextureHazards),
+	 * for RenderRuns: the target's texture, the copy, the target rect it
+	 * took, the offset from a target rect to the copy's, the target's
+	 * unscaled size and the scale. dst is null when nothing was copied. */
+	struct RunsCopy
+	{
+		GSTexture* src;
+		GSTexture* dst;
+		GSVector4i range;
+		GSVector4i offset;
+		GSVector2i src_size;
+		float scale;
+	} m_runs_copy = {};
+	GSHWDrawConfig m_runs_conf = {};
+	u16* m_runs_index = nullptr;
+	u32 m_runs_index_cap = 0;
+	u32 m_runs_prims = 0;
+	u32 m_runs_n_gs = 3;
+	/* The batch reads the target in place (HandleTextureHazards), its
+	 * runs grouped by RenderRunsInPlace; the target's unscaled size and
+	 * scale, for a copy of the whole of it should the grouping not hold. */
+	u32* m_runs_groups = nullptr;
+	GSVector2i m_runs_rt_size = {};
+	float m_runs_rt_scale = 1.0f;
+	u32 m_runs_groups_cap = 0;
+	bool m_runs_direct = false;
 	HWCachedCtx m_cached_ctx;
 
-	// software sprite renderer state
-	std::vector<GSVertexSW> m_sw_vertex_buffer;
-	std::unique_ptr<GSTextureCacheSW::Texture> m_sw_texture[7 + 1];
-	std::unique_ptr<GSVirtualAlignedClass<32>> m_sw_rasterizer;
+	/* software sprite renderer state: the vertices of the draw in hand,
+	 * grown to the largest draw and kept (32-byte aligned, as the type) */
+	GSVertexSW* m_sw_vertex_buffer = nullptr;
+	u32 m_sw_vertex_capacity = 0;
+	GSVertexSW* SWVertexBuffer(u32 count);
+	GSTextureCacheSW::Texture* m_sw_texture[7 + 1] = {};
+	GSVirtualAlignedClass<32>* m_sw_rasterizer = nullptr;
 
 public:
 	GSRendererHW();
@@ -418,7 +457,8 @@ public:
 
 	void PurgeTextureCache(bool sources, bool targets, bool hash_cache);
 	void ReadbackTextureCache();
-	GSTexture* LookupPaletteSource(u32 CBP, u32 CPSM, u32 CBW, GSVector2i& offset, float* scale, const GSVector2i& size);
+	GSTexture* LookupPaletteSource(u32 CBP, u32 CPSM, u32 CBW, GSVector2i& offset, float* scale, float* sample, const GSVector2i& size);
+	bool CanDrawRuns();
 
 	/// Called by the texture cache to know for certain whether there is a channel shuffle.
 	bool TestChannelShuffle(GSTextureCache::Target* src);

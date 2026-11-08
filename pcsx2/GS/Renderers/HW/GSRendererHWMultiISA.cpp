@@ -52,11 +52,23 @@ bool GSRendererHWFunctions::SwPrimRender(GSRendererHW& hw, bool invalidate_tc, b
 	GSRasterizerData data;
 	GSScanlineGlobalData& gd = data.global;
 
-	hw.m_sw_vertex_buffer.resize(((hw.m_vertex.next + 1) & ~1));
+	GSVertexSW* const sw_vertices = hw.SWVertexBuffer((hw.m_vertex.next + 1) & ~1);
+
+	/* Drawn from and into local memory: parked targets' pixels there go
+	 * to it first. */
+	g_texture_cache->FlushParked(hw.m_cached_ctx.FRAME.Block(), GSLocalMemory::GetUnwrappedEndBlockAddress(
+		hw.m_cached_ctx.FRAME.Block(), hw.m_cached_ctx.FRAME.FBW, hw.m_cached_ctx.FRAME.PSM, hw.m_r));
+	if (!hw.m_cached_ctx.ZBUF.ZMSK || hw.m_cached_ctx.TEST.ZTE)
+		g_texture_cache->FlushParked(hw.m_cached_ctx.ZBUF.Block(), GSLocalMemory::GetUnwrappedEndBlockAddress(
+			hw.m_cached_ctx.ZBUF.Block(), hw.m_cached_ctx.FRAME.FBW, hw.m_cached_ctx.ZBUF.PSM, hw.m_r));
+	if (PRIM->TME)
+		g_texture_cache->FlushParked(hw.m_cached_ctx.TEX0.TBP0, GSLocalMemory::GetUnwrappedEndBlockAddress(
+			hw.m_cached_ctx.TEX0.TBP0, hw.m_cached_ctx.TEX0.TBW, hw.m_cached_ctx.TEX0.PSM,
+			GSVector4i(0, 0, 1 << hw.m_cached_ctx.TEX0.TW, 1 << hw.m_cached_ctx.TEX0.TH)));
 
 	data.primclass = vt.m_primclass;
 	data.buff = nullptr;
-	data.vertex = hw.m_sw_vertex_buffer.data();
+	data.vertex = sw_vertices;
 	data.vertex_count = hw.m_vertex.next;
 	data.index = hw.m_index.buff;
 	data.index_count = hw.m_index.tail;
@@ -200,7 +212,7 @@ bool GSRendererHWFunctions::SwPrimRender(GSRendererHW& hw, bool invalidate_tc, b
 			const GSVector4i r = hw.GetTextureMinMax(TEX0, context->CLAMP, gd.sel.ltf, true).coverage;
 
 			if (!hw.m_sw_texture[0])
-				hw.m_sw_texture[0] = std::make_unique<GSTextureCacheSW::Texture>(0, TEX0, env.TEXA);
+				hw.m_sw_texture[0] = new GSTextureCacheSW::Texture(0, TEX0, env.TEXA);
 			else
 				hw.m_sw_texture[0]->Reset(0, TEX0, env.TEXA);
 
@@ -282,7 +294,7 @@ bool GSRendererHWFunctions::SwPrimRender(GSRendererHW& hw, bool invalidate_tc, b
 					vt.m_max.t *= 0.5f;
 
 					if (!hw.m_sw_texture[i])
-						hw.m_sw_texture[i] = std::make_unique<GSTextureCacheSW::Texture>(gd.sel.tw + 3, MIP_TEX0, env.TEXA);
+						hw.m_sw_texture[i] = new GSTextureCacheSW::Texture(gd.sel.tw + 3, MIP_TEX0, env.TEXA);
 					else
 						hw.m_sw_texture[i]->Reset(gd.sel.tw + 3, MIP_TEX0, env.TEXA);
 
@@ -536,9 +548,9 @@ bool GSRendererHWFunctions::SwPrimRender(GSRendererHW& hw, bool invalidate_tc, b
 	// GSSingleRasterizer is part of the x86 SW renderer, which isn't built on
 	// arm64; the HW renderer's CPU-side draw fallback is unavailable there.
 	if (!hw.m_sw_rasterizer)
-		hw.m_sw_rasterizer = std::make_unique<GSSingleRasterizer>();
+		hw.m_sw_rasterizer = new GSSingleRasterizer();
 
-	static_cast<GSSingleRasterizer*>(hw.m_sw_rasterizer.get())->Draw(data);
+	static_cast<GSSingleRasterizer*>(hw.m_sw_rasterizer)->Draw(data);
 #endif
 
 	if (invalidate_tc)
@@ -555,7 +567,7 @@ bool GSRendererHWFunctions::SwPrimRender(GSRendererHW& hw, bool invalidate_tc, b
 		uq.draw      = GSState::s_n;
 		uq.rect      = bbox;
 		uq.zero_clear = false;
-		hw.m_draw_transfers.push_back(uq);
+		hw.PushDrawTransfer(uq);
 	}
 
 	return true;

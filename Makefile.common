@@ -99,6 +99,9 @@ CXXFLAGS += $(FLAGS)
 # ============================================================================
 SOURCES_C += \
 	$(LRPS2_DIR)/GS/Renderers/HW/GSObjectPool.c \
+	$(LRPS2_DIR)/GS/Renderers/Common/GSFlatMap.c \
+	$(LRPS2_DIR)/GS/Renderers/Common/GSStableMap.c \
+	$(LRPS2_DIR)/GS/GSPage2Tile.c \
 	$(LRPS2_DIR)/GS/Renderers/SW/GSHiresMem.c \
 	$(LRPS2_DIR)/GS/Renderers/HW/GSHashTable.c \
 	$(LRPS2_DIR)/GS/Renderers/HW/GSSpriteSnap.c \
@@ -125,7 +128,7 @@ SOURCES_C += \
 	$(LRPS2_DIR)/Memory.c \
 	$(LRPS2_DIR)/VirtualMemory.c \
 	$(LRPS2_DIR)/GS/Renderers/Common/GSCodeReserve.c \
-	$(LRPS2_DIR)/GS/Renderers/HW/GSScratch.c \
+	$(LRPS2_DIR)/GS/Renderers/Common/GSScratch.c \
 	$(LRPS2_DIR)/GS/Renderers/DX12/GSD3D12Heap.c \
 	$(LRPS2_DIR)/GS/Renderers/DX12/GSD3D12Warm.c \
 	$(LIBRETRO_COMM_DIR)/compat/compat_posix_string.c \
@@ -241,8 +244,8 @@ endif
 # ============================================================================
 # common
 # ============================================================================
-SOURCES_CXX += \
-	$(LRPS2_DIR)/HostFS.cpp \
+SOURCES_C += \
+	$(LRPS2_DIR)/HostFS.c \
 
 # common/emitter is the x86-only JIT code emitter. On aarch64 the recompilers
 # that use it are gated out (VIXL is the arm64 emitter instead), so exclude it
@@ -270,7 +273,6 @@ endif
 # ============================================================================
 SOURCES_CXX += \
 	$(LRPS2_DIR)/FormatString.cpp \
-	$(LRPS2_DIR)/StringView.cpp \
 	$(LRPS2_DIR)/Cache.cpp \
 	$(LRPS2_DIR)/COP0.cpp \
 	$(LRPS2_DIR)/Counters.cpp \

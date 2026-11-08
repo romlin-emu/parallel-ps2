@@ -14,7 +14,6 @@
  */
 
 #include <compat/strl.h>
-#include "StringView.h"
 #include "FormatString.h"
 #include "common/Pcsx2Defs.h"
 #include <retro_atomic.h>
@@ -267,7 +266,7 @@ void VMManager::Internal::CPUThreadShutdown(void)
 
 	/* Nothing consults the game database without a VM, and the next
 	 * load re-reads it lazily. */
-	GameDatabase::unload();
+	GameDatabase_Unload();
 
 #if defined(__GLIBC__)
 	/* Returning the allocations is not the same as returning the
@@ -349,12 +348,12 @@ void VMManager::ApplyGameFixes()
 	if (s_game_crc == 0)
 		return;
 
-	const GameDatabaseSchema::GameEntry* game = GameDatabase::findGame(s_game_serial);
+	const GameDatabaseEntry* game = GameDatabase_FindGame(s_game_serial);
 	if (!game)
 		return;
 
-	s_active_game_fixes += game->applyGameFixes(EmuConfig, EmuConfig.EnableGameFixes);
-	s_active_game_fixes += game->applyGSHardwareFixes(EmuConfig.GS);
+	s_active_game_fixes += GameDatabase_ApplyGameFixes(game, EmuConfig, EmuConfig.EnableGameFixes);
+	s_active_game_fixes += GameDatabase_ApplyGSHardwareFixes(game, EmuConfig.GS);
 }
 
 void VMManager::RefreshRunningGameAfterStateLoad()
@@ -371,7 +370,8 @@ void VMManager::LoadPatches(const std::string& serial, u32 crc)
 {
 	std::string message;
 	int patch_count = 0;
-	const std::string crc_string(FormatString::Format("%08X", crc));
+	char crc_string[9];
+	snprintf(crc_string, sizeof(crc_string), "%08X", crc);
 	s_patches_crc                   = crc;
 	s_active_widescreen_patches     = 0;
 	s_active_no_interlacing_patches = 0;
@@ -379,17 +379,17 @@ void VMManager::LoadPatches(const std::string& serial, u32 crc)
 
 	if (EmuConfig.EnablePatches)
 	{
-		const GameDatabaseSchema::GameEntry* game = GameDatabase::findGame(serial);
+		const GameDatabaseEntry* game = GameDatabase_FindGame(serial.c_str());
 		if (game)
 		{
-			const std::string* patches = game->findPatch(crc);
-			if (patches && (patch_count = LoadPatchesFromString(patches->c_str())) > 0)
+			const char* patches = GameDatabase_FindPatch(game, crc);
+			if (patches && (patch_count = LoadPatchesFromString(patches)) > 0)
 			{
 				log_cb(RETRO_LOG_INFO, "(GameDB) Patches Loaded: %d\n", patch_count);
 				message += FormatString::Format("%d game patches", patch_count);
 			}
 
-			LoadDynamicPatches(game->dynaPatches);
+			LoadDynamicPatches(game->dynaPatches, game->nDynaPatches);
 		}
 	}
 
@@ -511,17 +511,10 @@ void VMManager::UpdateRunningGame(bool resetting, bool game_starting, bool swapp
 		strlcpy(s_game_serial, new_serial, sizeof(s_game_serial));
 		s_game_crc    = new_crc;
 
-		std::string memcardFilters;
+		const GameDatabaseEntry* game = GameDatabase_FindGame(s_game_serial);
+		const char* memcardFilters    = game ? game->memcardFilters : "";
 
-		if (const GameDatabaseSchema::GameEntry* game = GameDatabase::findGame(s_game_serial))
-		{
-			memcardFilters = game->memcardFiltersAsString();
-		}
-		else
-		{
-		}
-
-		sioSetGameSerial(memcardFilters.empty() ? s_game_serial : memcardFilters.c_str());
+		sioSetGameSerial(memcardFilters[0] ? memcardFilters : s_game_serial);
 
 		// If we don't reset the timer here, when using folder memcards the reindex will cause an eject,
 		// which a bunch of games don't like since they access the memory card on boot.
@@ -555,7 +548,10 @@ void VMManager::ReloadPatches()
 
 bool VMManager::IsElfFileName(const std::string_view path)
 {
-	return StringView::EndsWithNoCase(path, ".elf");
+	/* ".elf" in either case, at the end */
+	const size_t n = path.size();
+	return n >= 4 && path[n - 4] == '.' && (path[n - 3] | 0x20) == 'e'
+		&& (path[n - 2] | 0x20) == 'l' && (path[n - 1] | 0x20) == 'f';
 }
 
 bool VMManager::AutoDetectSource(const std::string& filename)
@@ -1063,7 +1059,6 @@ bool VMManager::Internal::IsExecutionInterrupted()
 
 void VMManager::Internal::EntryPointCompilingOnCPUThread()
 {
-	int i;
 	// Classic chicken and egg problem here. We don't want to update the running game
 	// until the game entry point actually runs, because that can update settings, which
 	// can flush the JIT, etc. But we need to apply patches for games where the entry
@@ -1073,25 +1068,13 @@ void VMManager::Internal::EntryPointCompilingOnCPUThread()
 		SysGetDiscID(serial, sizeof(serial));
 		LoadPatches(serial, ElfCRC);
 	}
-	for (i = 0; static_cast<size_t>(i) < Patch.size(); i++)
-	{
-		int _place = Patch[i].placetopatch;
-		if (_place == PPT_ONCE_ON_LOAD)
-			_ApplyPatch(&Patch[i]);
-	}
+	ApplyLoadedPatches(1u << PPT_ONCE_ON_LOAD);
 }
 
 void VMManager::Internal::GameStartingOnCPUThread()
 {
-	int i;
 	UpdateRunningGame(false, true, false);
-	for (i = 0; static_cast<size_t>(i) < Patch.size(); i++)
-	{
-		int _place = Patch[i].placetopatch;
-		if ( (_place == PPT_ONCE_ON_LOAD)
-		  || (_place == PPT_COMBINED_0_1))
-			_ApplyPatch(&Patch[i]);
-	}
+	ApplyLoadedPatches((1u << PPT_ONCE_ON_LOAD) | (1u << PPT_COMBINED_0_1));
 }
 
 void VMManager::CheckForCPUConfigChanges(const Pcsx2Config& old_config)
@@ -1186,15 +1169,14 @@ void VMManager::CheckForMemoryCardConfigChanges(const Pcsx2Config& old_config)
 	}
 
 	// force reindexing, mc folder code is janky
-	std::string sioSerial;
 	{
 		SLockGuard lock(s_info_mutex());
-		if (const GameDatabaseSchema::GameEntry* game = GameDatabase::findGame(s_game_serial))
-			sioSerial = game->memcardFiltersAsString();
-		if (sioSerial.empty())
-			sioSerial = s_game_serial;
+		const GameDatabaseEntry* game = GameDatabase_FindGame(s_game_serial);
+		const char* filters           = game ? game->memcardFilters : "";
+		/* while the lock is held: the serial is copied, and the entry
+		 * belongs to the database, which a VM shutdown unloads */
+		sioSetGameSerial(filters[0] ? filters : s_game_serial);
 	}
-	sioSetGameSerial(sioSerial.c_str());
 }
 
 void VMManager::CheckForConfigChanges(const Pcsx2Config& old_config)
@@ -1448,8 +1430,9 @@ void VMManager::ApplyHardwareDefaults(Pcsx2Config& c)
 	SetMTVUAndAffinityControlDefault(c);
 }
 
-const std::vector<u32>& VMManager::GetSortedProcessorList()
+const u32* VMManager::GetSortedProcessorList(u32* count)
 {
 	EnsureCPUInfoInitialized();
-	return s_processor_list;
+	*count = static_cast<u32>(s_processor_list.size());
+	return s_processor_list.data();
 }

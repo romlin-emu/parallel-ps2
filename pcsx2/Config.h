@@ -287,26 +287,11 @@ enum class GSHardwareDownloadMode : u8
 	Disabled
 };
 
-enum class GSHWAutoFlushLevel : u8
-{
-	Disabled,
-	SpritesOnly,
-	Enabled,
-};
-
 enum class GSTextureInRtMode : u8
 {
 	Disabled,
 	InsideTargets,
 	MergeTargets,
-};
-
-enum class GSBilinearDirtyMode : u8
-{
-	Automatic,
-	ForceBilinear,
-	ForceNearest,
-	MaxCount
 };
 
 enum GSHalfPixelOffset
@@ -503,7 +488,6 @@ struct Pcsx2Config
 
 				bool
 					GPUPaletteConversion : 1,
-					AutoFlushSW : 1,
 					PreloadFrameWithGSData : 1,
 					Mipmap : 1,
 					ManualUserHacks : 1,
@@ -549,7 +533,6 @@ struct Pcsx2Config
 		int SkipDrawStart = 0;
 		int SkipDrawEnd = 0;
 
-		GSHWAutoFlushLevel UserHacks_AutoFlush = GSHWAutoFlushLevel::Disabled;
 		GSHalfPixelOffset UserHacks_HalfPixelOffset = GSHalfPixelOffset::Off;
 		s8 UserHacks_RoundSprite = 0;
 		GSNativeScaling UserHacks_NativeScaling = GSNativeScaling::NativeScaling_Normal;
@@ -559,7 +542,6 @@ struct Pcsx2Config
 		u8 UserHacks_CPUSpriteRenderLevel = 0;
 		u8 UserHacks_CPUCLUTRender = 0;
 		GSTextureInRtMode UserHacks_TextureInsideRt = GSTextureInRtMode::Disabled;
-		GSBilinearDirtyMode UserHacks_BilinearHack = GSBilinearDirtyMode::Automatic;
 		GSLimit24BitDepth UserHacks_Limit24BitDepth = GSLimit24BitDepth::Disabled;
 		TriFiltering TriFilter = TriFiltering::Automatic;
 		s8 OverrideTextureBarriers = -1;
@@ -786,7 +768,8 @@ struct Pcsx2Config
 		bool operator==(const SpeedhackOptions& right) const;
 		bool operator!=(const SpeedhackOptions& right) const;
 		static const char* GetSpeedHackName(SpeedHack id);
-		static std::optional<SpeedHack> ParseSpeedHackName(const std::string_view& name);
+		/* The hack a name (a run of len characters) names; false if none. */
+		static bool ParseSpeedHackName(const char* name, size_t len, SpeedHack* out);
 	};
 
 	// ------------------------------------------------------------------------

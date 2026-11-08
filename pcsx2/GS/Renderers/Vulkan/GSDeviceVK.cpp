@@ -13,12 +13,9 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <cstring>
-#include "../../../StringView.h"
-#include "../../../FormatString.h"
+#include <string.h>
 #include "common/Pcsx2Defs.h"
-#include <cassert>
-#include <vector>
+#include <assert.h>
 
 #include "GS/GS.h"
 #include "GS/Renderers/Vulkan/GSDeviceVK.h"
@@ -42,10 +39,7 @@
 #include <rthreads/rthreads.h>
 #endif
 
-#include <limits>
-#include <algorithm>
-#include <array>
-#include <cstring>
+#include <string.h>
 
 #include <libretro.h>
 #ifdef ENABLE_PCSX2_PROFILER
@@ -78,6 +72,46 @@ struct VKSpirvNamed
 };
 #include "VKShaders.inc"
 #include "VKPipelineKey.h"
+
+/* The device's GSFlatMaps, by their key types. Each hashes its key at
+ * its constant size, so XXH3's fixed-length path inlines. */
+static VkPipeline* vk_pipe_find(const gs_flat_map_t* map, const GSDeviceVK::PipelineSelector& key)
+{
+	return static_cast<VkPipeline*>(gs_flat_map_find(map, &key, sizeof(key), gs_key_hash(&key, sizeof(key))));
+}
+
+/* The entry for key, made (null) if there was none; *inserted says
+ * which. NULL only if the map could not grow. */
+static VkPipeline* vk_pipe_entry(gs_flat_map_t* map, const GSDeviceVK::PipelineSelector& key, int* inserted)
+{
+	return static_cast<VkPipeline*>(gs_flat_map_insert(map, &key, gs_key_hash(&key, sizeof(key)), inserted));
+}
+
+/* Every pipeline in a map destroyed, and the map emptied. */
+static void vk_pipe_destroy_all(gs_flat_map_t* map)
+{
+	size_t i;
+	for (i = 0; i < GS_FLAT_MAP_SLOTS(map); i++)
+	{
+		if (!GS_FLAT_MAP_USED(map, i))
+			continue;
+		VkPipeline p = *static_cast<VkPipeline*>(GS_FLAT_MAP_VALUE(map, i));
+		if (p != VK_NULL_HANDLE)
+			vkDestroyPipeline(vk_init_info.device, p, nullptr);
+	}
+	gs_flat_map_free(map);
+}
+
+static void* vk_u32_find(const gs_flat_map_t* map, u32 key)
+{
+	return gs_flat_map_find(map, &key, sizeof(key), gs_key_hash(&key, sizeof(key)));
+}
+
+static void* vk_u32_entry(gs_flat_map_t* map, u32 key, int* inserted)
+{
+	return gs_flat_map_insert(map, &key, gs_key_hash(&key, sizeof(key)), inserted);
+}
+
 
 static retro_hw_render_interface_vulkan *vulkan;
 
@@ -252,12 +286,13 @@ const VkApplicationInfo *get_application_info_vulkan(void)
 	return &app_info;
 }
 
-static void add_name_unique(std::vector<const char *> &list, const char *value) {
-	for (const char *name : list)
-		if (!strcmp(value, name))
+/* value onto a list of names unless it is already there. */
+static void add_name_unique(const char** list, u32* count, const char* value)
+{
+	for (u32 i = 0; i < *count; i++)
+		if (!strcmp(value, list[i]))
 			return;
-
-	list.push_back(value);
+	list[(*count)++] = value;
 }
 static VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice_libretro(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkDevice *pDevice)
 {
@@ -270,17 +305,33 @@ static VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice_libretro(VkPhysicalDevice p
 	}
 
 	VkDeviceCreateInfo info = *pCreateInfo;
-	std::vector<const char *> EnabledLayerNames(info.ppEnabledLayerNames, info.ppEnabledLayerNames + info.enabledLayerCount);
-	std::vector<const char *> EnabledExtensionNames(info.ppEnabledExtensionNames, info.ppEnabledExtensionNames + info.enabledExtensionCount);
 	VkPhysicalDeviceFeatures EnabledFeatures = *info.pEnabledFeatures;
+	/* The lists as given plus the frontend's, each name once. */
+	const u32 max_layers     = info.enabledLayerCount + vk_init_info.num_required_device_layers;
+	const u32 max_extensions = info.enabledExtensionCount + vk_init_info.num_required_device_extensions + 1;
+	const char** EnabledLayerNames     = static_cast<const char**>(malloc(sizeof(const char*) * (max_layers ? max_layers : 1)));
+	const char** EnabledExtensionNames = static_cast<const char**>(malloc(sizeof(const char*) * max_extensions));
+	u32 layer_count = 0, extension_count = 0;
+	VkResult res;
 
+	if (!EnabledLayerNames || !EnabledExtensionNames)
+	{
+		free(EnabledLayerNames);
+		free(EnabledExtensionNames);
+		return VK_ERROR_OUT_OF_HOST_MEMORY;
+	}
+
+	for (unsigned i = 0; i < info.enabledLayerCount; i++)
+		add_name_unique(EnabledLayerNames, &layer_count, info.ppEnabledLayerNames[i]);
 	for (unsigned i = 0; i < vk_init_info.num_required_device_layers; i++)
-		add_name_unique(EnabledLayerNames, vk_init_info.required_device_layers[i]);
+		add_name_unique(EnabledLayerNames, &layer_count, vk_init_info.required_device_layers[i]);
 
+	for (unsigned i = 0; i < info.enabledExtensionCount; i++)
+		add_name_unique(EnabledExtensionNames, &extension_count, info.ppEnabledExtensionNames[i]);
 	for (unsigned i = 0; i < vk_init_info.num_required_device_extensions; i++)
-		add_name_unique(EnabledExtensionNames, vk_init_info.required_device_extensions[i]);
+		add_name_unique(EnabledExtensionNames, &extension_count, vk_init_info.required_device_extensions[i]);
 
-	add_name_unique(EnabledExtensionNames, VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME);
+	add_name_unique(EnabledExtensionNames, &extension_count, VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME);
 	if (vk_init_info.required_features)
 	{
 		for (unsigned i = 0; i < sizeof(VkPhysicalDeviceFeatures) / sizeof(VkBool32); i++)
@@ -290,13 +341,16 @@ static VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice_libretro(VkPhysicalDevice p
 		}
 	}
 
-	info.enabledLayerCount       = (uint32_t)EnabledLayerNames.size();
-	info.ppEnabledLayerNames     = info.enabledLayerCount ? EnabledLayerNames.data() : nullptr;
-	info.enabledExtensionCount   = (uint32_t)EnabledExtensionNames.size();
-	info.ppEnabledExtensionNames = info.enabledExtensionCount ? EnabledExtensionNames.data() : nullptr;
+	info.enabledLayerCount       = layer_count;
+	info.ppEnabledLayerNames     = layer_count ? EnabledLayerNames : nullptr;
+	info.enabledExtensionCount   = extension_count;
+	info.ppEnabledExtensionNames = extension_count ? EnabledExtensionNames : nullptr;
 	info.pEnabledFeatures        = &EnabledFeatures;
 
-	return vkCreateDevice_org(physicalDevice, &info, pAllocator, pDevice);
+	res = vkCreateDevice_org(physicalDevice, &info, pAllocator, pDevice);
+	free(EnabledLayerNames);
+	free(EnabledExtensionNames);
+	return res;
 }
 
 static VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit_libretro(VkQueue queue, uint32_t submitCount, const VkSubmitInfo *pSubmits, VkFence fence)
@@ -401,48 +455,22 @@ static void SafeDestroyDescriptorSetLayout(VkDevice dev, VkDescriptorSetLayout& 
 	}
 }
 
-	GSDeviceVK::GPUNameList GSDeviceVK::EnumerateGPUNames(VkInstance instance)
+	bool GSDeviceVK::ExtensionList::Has(const char* name) const
 	{
-		u32 gpu_count = 0;
-		VkResult res = vkEnumeratePhysicalDevices(instance, &gpu_count, nullptr);
-		if (res != VK_SUCCESS || gpu_count == 0)
-			return {};
+		for (u32 i = 0; i < count; i++)
+			if (!strcmp(names[i], name))
+				return true;
+		return false;
+	}
 
-		GPUList gpus;
-		gpus.resize(gpu_count);
-
-		res = vkEnumeratePhysicalDevices(instance, &gpu_count, gpus.data());
-		if (res != VK_SUCCESS)
-			return {};
-
-		GPUNameList gpu_names;
-		gpu_names.reserve(gpu_count);
-		for (u32 i = 0; i < gpu_count; i++)
-		{
-			VkPhysicalDeviceProperties props = {};
-			vkGetPhysicalDeviceProperties(gpus[i], &props);
-
-			std::string gpu_name(props.deviceName);
-
-			// handle duplicate adapter names
-			if (std::any_of(gpu_names.begin(), gpu_names.end(),
-					[&gpu_name](const std::string& other) { return (gpu_name == other); }))
-			{
-				std::string original_adapter_name = std::move(gpu_name);
-
-				u32 current_extra = 2;
-				do
-				{
-					gpu_name = FormatString::Format("%s (%u)", original_adapter_name.c_str(), current_extra);
-					current_extra++;
-				} while (std::any_of(gpu_names.begin(), gpu_names.end(),
-					[&gpu_name](const std::string& other) { return (gpu_name == other); }));
-			}
-
-			gpu_names.push_back(std::move(gpu_name));
-		}
-
-		return gpu_names;
+	bool GSDeviceVK::ExtensionList::Add(const char* name)
+	{
+		if (Has(name))
+			return true;
+		if (count >= MAX_NAMES)
+			return false;
+		names[count++] = name;
+		return true;
 	}
 
 	bool GSDeviceVK::SelectDeviceExtensions(ExtensionList* extension_list)
@@ -458,22 +486,31 @@ static void SafeDestroyDescriptorSetLayout(VkDevice dev, VkDescriptorSetLayout& 
 			return false;
 		}
 
-		std::vector<VkExtensionProperties> available_extension_list(extension_count);
+		VkExtensionProperties* available = static_cast<VkExtensionProperties*>(calloc(extension_count, sizeof(VkExtensionProperties)));
+		if (!available)
+			return false;
 		res = vkEnumerateDeviceExtensionProperties(
-			vk_init_info.gpu, nullptr, &extension_count, available_extension_list.data());
+			vk_init_info.gpu, nullptr, &extension_count, available);
+		if (res != VK_SUCCESS && res != VK_INCOMPLETE)
+		{
+			free(available);
+			return false;
+		}
 
-		auto SupportsExtension = [&available_extension_list, extension_list](const char* name, bool required) {
-			if (std::find_if(available_extension_list.begin(), available_extension_list.end(),
-					[name](const VkExtensionProperties& properties) { return !strcmp(name, properties.extensionName); }) !=
-				available_extension_list.end())
+		auto SupportsExtension = [available, extension_count, extension_list](const char* name, bool required) {
+			for (u32 i = 0; i < extension_count; i++)
 			{
-				if (std::none_of(extension_list->begin(), extension_list->end(),
-						[name](const char* existing_name) { return (strcmp(existing_name, name) == 0); }))
+				if (strcmp(name, available[i].extensionName) != 0)
+					continue;
+				if (!extension_list->Has(name))
 				{
 					log_cb(RETRO_LOG_INFO, "Enabling extension: %s\n", name);
-					extension_list->push_back(name);
+					if (!extension_list->Add(name))
+					{
+						log_cb(RETRO_LOG_ERROR, "Vulkan: more than %u device extensions.\n", (unsigned)ExtensionList::MAX_NAMES);
+						return false;
+					}
 				}
-
 				return true;
 			}
 
@@ -507,13 +544,12 @@ static void SafeDestroyDescriptorSetLayout(VkDevice dev, VkDescriptorSetLayout& 
 			SupportsExtension(VK_KHR_SHADER_DRAW_PARAMETERS_EXTENSION_NAME, false);
 		m_optional_extensions.vk_ext_extended_dynamic_state =
 			SupportsExtension(VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME, false);
-		m_optional_extensions.vk_ext_extended_dynamic_state3 =
-			SupportsExtension(VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME, false);
 		/* (the libraries extension needs VK_KHR_pipeline_library) */
 		m_optional_extensions.vk_ext_graphics_pipeline_library =
 			SupportsExtension(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME, false)
 			&& SupportsExtension(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME, false);
 
+		free(available);
 		return true;
 	}
 
@@ -548,9 +584,11 @@ static void SafeDestroyDescriptorSetLayout(VkDevice dev, VkDescriptorSetLayout& 
 			return false;
 		}
 
-		std::vector<VkQueueFamilyProperties> queue_family_properties(queue_family_count);
+		VkQueueFamilyProperties* queue_family_properties = static_cast<VkQueueFamilyProperties*>(calloc(queue_family_count, sizeof(VkQueueFamilyProperties)));
+		if (!queue_family_properties)
+			return false;
 		vkGetPhysicalDeviceQueueFamilyProperties(
-			vk_init_info.gpu, &queue_family_count, queue_family_properties.data());
+			vk_init_info.gpu, &queue_family_count, queue_family_properties);
 		log_cb(RETRO_LOG_INFO, "%u vulkan queue families\n", queue_family_count);
 
 		// Find graphics and present queues.
@@ -566,6 +604,7 @@ static void SafeDestroyDescriptorSetLayout(VkDevice dev, VkDescriptorSetLayout& 
 				break;
 			}
 		}
+		free(queue_family_properties);
 
 		if (m_graphics_queue_family_index == queue_family_count)
 		{
@@ -580,7 +619,7 @@ static void SafeDestroyDescriptorSetLayout(VkDevice dev, VkDescriptorSetLayout& 
 		device_info.queueCreateInfoCount = 0;
 
 		static constexpr float queue_priorities[] = {1.0f, 0.0f}; // Low priority for the spin queue
-		std::array<VkDeviceQueueCreateInfo, 2> queue_infos;
+		VkDeviceQueueCreateInfo queue_infos[2];
 
 		VkDeviceQueueCreateInfo& graphics_queue_info = queue_infos[device_info.queueCreateInfoCount++];
 		graphics_queue_info.sType                    = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
@@ -590,18 +629,25 @@ static void SafeDestroyDescriptorSetLayout(VkDevice dev, VkDescriptorSetLayout& 
 		graphics_queue_info.queueCount               = 1;
 		graphics_queue_info.pQueuePriorities         = queue_priorities;
 
-		device_info.pQueueCreateInfos                = queue_infos.data();
+		device_info.pQueueCreateInfos                = queue_infos;
 
 		ExtensionList enabled_extensions;
+		enabled_extensions.count = 0;
 		for (u32 i = 0; i < num_required_device_extensions; i++)
-			enabled_extensions.emplace_back(required_device_extensions[i]);
+		{
+			if (!enabled_extensions.Add(required_device_extensions[i]))
+			{
+				log_cb(RETRO_LOG_ERROR, "Vulkan: more than %u required device extensions.\n", (unsigned)ExtensionList::MAX_NAMES);
+				return false;
+			}
+		}
 		if (!SelectDeviceExtensions(&enabled_extensions))
 			return false;
 
 		device_info.enabledLayerCount       = num_required_device_layers;
 		device_info.ppEnabledLayerNames     = required_device_layers;
-		device_info.enabledExtensionCount   = static_cast<uint32_t>(enabled_extensions.size());
-		device_info.ppEnabledExtensionNames = enabled_extensions.data();
+		device_info.enabledExtensionCount   = enabled_extensions.count;
+		device_info.ppEnabledExtensionNames = enabled_extensions.names;
 
 		// Check for required features before creating.
 		SelectDeviceFeatures(required_features);
@@ -637,50 +683,34 @@ static void SafeDestroyDescriptorSetLayout(VkDevice dev, VkDescriptorSetLayout& 
 				Vulkan::AddPointerToChain(&device_info, &eds_feature);
 		}
 
-		/* Blend state on the command buffer, and pipelines linked from
-		 * libraries: each only with all of what it needs (fast linking for
-		 * the libraries, or linking a sibling is no cheaper than building
-		 * it). LRPS2_TEST_VK_NO_EDS3 / _NO_GPL leave either off, for the
-		 * tests (tests/vkpipewarm). */
-		VkPhysicalDeviceExtendedDynamicState3FeaturesEXT eds3_feature = {
-			VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT};
+		/* Pipelines linked from libraries, only with all of what it needs
+		 * (fast linking, or linking a sibling is no cheaper than building
+		 * it). LRPS2_TEST_VK_NO_GPL leaves them off, for the tests
+		 * (tests/vkpipewarm). The blend is not set on the command buffer
+		 * (VK_EXT_extended_dynamic_state3): NVIDIA's driver drew nothing
+		 * with it, Devil May Cry 3 black and Soulcalibur III's picture
+		 * frozen, with the libraries on or off, the state set before or
+		 * after the pipeline's bind, and a dual-source blend declared in
+		 * the pipeline; the blend stays in the pipeline, and in the key. */
 		VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT gpl_feature = {
 			VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT};
-		if (getenv("LRPS2_TEST_VK_NO_EDS3"))
-			m_optional_extensions.vk_ext_extended_dynamic_state3 = false;
 		if (getenv("LRPS2_TEST_VK_NO_GPL"))
 			m_optional_extensions.vk_ext_graphics_pipeline_library = false;
 		m_test_mem_cap = getenv("LRPS2_TEST_VK_MEM_CAP") ? strtoull(getenv("LRPS2_TEST_VK_MEM_CAP"), NULL, 10) : 0;
-		if (m_optional_extensions.vk_ext_extended_dynamic_state3 || m_optional_extensions.vk_ext_graphics_pipeline_library)
+		if (m_optional_extensions.vk_ext_graphics_pipeline_library)
 		{
-			VkPhysicalDeviceExtendedDynamicState3FeaturesEXT eds3 = {
-				VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT};
 			VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT gpl = {
 				VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT};
 			VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT gpl_props = {
 				VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_PROPERTIES_EXT};
 			VkPhysicalDeviceFeatures2 features2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
 			VkPhysicalDeviceProperties2 properties2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
-			if (m_optional_extensions.vk_ext_extended_dynamic_state3)
-				Vulkan::AddPointerToChain(&features2, &eds3);
-			if (m_optional_extensions.vk_ext_graphics_pipeline_library)
-			{
-				Vulkan::AddPointerToChain(&features2, &gpl);
-				Vulkan::AddPointerToChain(&properties2, &gpl_props);
-				vkGetPhysicalDeviceProperties2(vk_init_info.gpu, &properties2);
-			}
+			Vulkan::AddPointerToChain(&features2, &gpl);
+			Vulkan::AddPointerToChain(&properties2, &gpl_props);
+			vkGetPhysicalDeviceProperties2(vk_init_info.gpu, &properties2);
 			vkGetPhysicalDeviceFeatures2(vk_init_info.gpu, &features2);
-			m_optional_extensions.vk_ext_extended_dynamic_state3 &= eds3.extendedDynamicState3ColorBlendEnable
-				&& eds3.extendedDynamicState3ColorBlendEquation && eds3.extendedDynamicState3ColorWriteMask;
-			m_optional_extensions.vk_ext_graphics_pipeline_library &= gpl.graphicsPipelineLibrary
+			m_optional_extensions.vk_ext_graphics_pipeline_library = gpl.graphicsPipelineLibrary
 				&& gpl_props.graphicsPipelineLibraryFastLinking;
-		}
-		if (m_optional_extensions.vk_ext_extended_dynamic_state3)
-		{
-			eds3_feature.extendedDynamicState3ColorBlendEnable   = VK_TRUE;
-			eds3_feature.extendedDynamicState3ColorBlendEquation = VK_TRUE;
-			eds3_feature.extendedDynamicState3ColorWriteMask     = VK_TRUE;
-			Vulkan::AddPointerToChain(&device_info, &eds3_feature);
 		}
 		if (m_optional_extensions.vk_ext_graphics_pipeline_library)
 		{
@@ -731,12 +761,6 @@ static void SafeDestroyDescriptorSetLayout(VkDevice dev, VkDescriptorSetLayout& 
 		m_dss_key     = 0;
 		m_dss_applied = 0;
 		m_dss_target  = m_optional_extensions.vk_ext_extended_dynamic_state ? &m_dss_key : &m_pipeline_selector.dss.key;
-		m_optional_extensions.vk_ext_extended_dynamic_state3 = m_optional_extensions.vk_ext_extended_dynamic_state3
-			&& vkCmdSetColorBlendEnableEXT && vkCmdSetColorBlendEquationEXT && vkCmdSetColorWriteMaskEXT;
-		/* (without it the key stays 0, which is what is applied) */
-		m_blend_dynamic = m_optional_extensions.vk_ext_extended_dynamic_state3 ? ~0u : 0u;
-		m_blend_key     = 0;
-		m_blend_applied = m_blend_dynamic;
 
 		// Grab the graphics and present queues.
 		vkGetDeviceQueue(vk_init_info.device, m_graphics_queue_family_index, 0, &m_graphics_queue);
@@ -811,8 +835,6 @@ static void SafeDestroyDescriptorSetLayout(VkDevice dev, VkDescriptorSetLayout& 
 			m_optional_extensions.vk_ext_rasterization_order_attachment_access ? "supported" : "NOT supported");
 		log_cb(RETRO_LOG_INFO, "Extended dynamic state (depth/stencil) is %s\n",
 			m_optional_extensions.vk_ext_extended_dynamic_state ? "in use" : "NOT in use");
-		log_cb(RETRO_LOG_INFO, "Extended dynamic state 3 (blend) is %s\n",
-			m_optional_extensions.vk_ext_extended_dynamic_state3 ? "in use" : "NOT in use");
 		log_cb(RETRO_LOG_INFO, "Graphics pipeline libraries are %s\n",
 			m_optional_extensions.vk_ext_graphics_pipeline_library ? "in use" : "NOT in use");
 
@@ -861,7 +883,11 @@ static void SafeDestroyDescriptorSetLayout(VkDevice dev, VkDescriptorSetLayout& 
 		const u64 fixed = (u64)TEXTURE_BUFFER_SIZE + VERTEX_BUFFER_SIZE + INDEX_BUFFER_SIZE
 			+ VERTEX_UNIFORM_BUFFER_SIZE + FRAGMENT_UNIFORM_BUFFER_SIZE
 			+ 2u * (u64)EXPAND_BUFFER_SIZE;
-		const u64 ceiling = gs_vk_heap_ceiling(working_set, block, fixed);
+		u64 ceiling = gs_vk_heap_ceiling(working_set, block, fixed);
+		/* (LRPS2_TEST_VK_HEAP_CEILING, in bytes: a heap that refuses, for
+		 * the tests of what does when it does) */
+		if (getenv("LRPS2_TEST_VK_HEAP_CEILING"))
+			ceiling = strtoull(getenv("LRPS2_TEST_VK_HEAP_CEILING"), NULL, 10);
 
 		if (!gs_vk_heap_init(&m_heap, vk_init_info.device, &mem_props, &fns, block,
 				dev_props.limits.nonCoherentAtomSize, ceiling))
@@ -984,9 +1010,9 @@ static void SafeDestroyDescriptorSetLayout(VkDevice dev, VkDescriptorSetLayout& 
 
 			VkCommandBufferAllocateInfo buffer_info = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, nullptr,
 				resources.command_pool, VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-				static_cast<u32>(resources.command_buffers.size())};
+				static_cast<u32>(sizeof(resources.command_buffers) / sizeof(resources.command_buffers[0]))};
 
-			res = vkAllocateCommandBuffers(m_device, &buffer_info, resources.command_buffers.data());
+			res = vkAllocateCommandBuffers(m_device, &buffer_info, resources.command_buffers);
 			if (res != VK_SUCCESS)
 				return false;
 
@@ -994,6 +1020,14 @@ static void SafeDestroyDescriptorSetLayout(VkDevice dev, VkDescriptorSetLayout& 
 
 			res = vkCreateFence(m_device, &fence_info, nullptr, &resources.fence);
 			if (res != VK_SUCCESS)
+				return false;
+
+			/* Room for what a busy frame puts on these up front, so the
+			 * lists grow at startup rather than in the middle of a game
+			 * the first time it destroys or uploads that much. They keep
+			 * their capacity when cleared. */
+			if (!gs_array_reserve(&resources.cleanup_resources, 512) ||
+				!gs_array_reserve(&resources.staging_in_flight, 64))
 				return false;
 			// TODO: A better way to choose the number of descriptors.
 			VkDescriptorPoolSize pool_sizes[] = {
@@ -1040,8 +1074,9 @@ static void SafeDestroyDescriptorSetLayout(VkDevice dev, VkDescriptorSetLayout& 
 			if (resources.command_buffers[0] != VK_NULL_HANDLE)
 			{
 				vkFreeCommandBuffers(m_device, resources.command_pool,
-					static_cast<u32>(resources.command_buffers.size()), resources.command_buffers.data());
-				resources.command_buffers.fill(VK_NULL_HANDLE);
+					static_cast<u32>(sizeof(resources.command_buffers) / sizeof(resources.command_buffers[0])), resources.command_buffers);
+				resources.command_buffers[0] = VK_NULL_HANDLE;
+				resources.command_buffers[1] = VK_NULL_HANDLE;
 			}
 			if (resources.command_pool != VK_NULL_HANDLE)
 			{
@@ -1106,40 +1141,39 @@ static void SafeDestroyDescriptorSetLayout(VkDevice dev, VkDescriptorSetLayout& 
 		key.color_feedback_loop = color_feedback_loop;
 		key.depth_sampling = depth_sampling;
 
-		auto it = m_render_pass_cache.find(key.key);
-		if (it != m_render_pass_cache.end())
-			return it->second;
+		const VkRenderPass* rp = static_cast<const VkRenderPass*>(vk_u32_find(&m_render_pass_cache, key.key));
+		if (rp)
+			return *rp;
 
 		return CreateCachedRenderPass(key);
 	}
 
 	VkRenderPass GSDeviceVK::GetRenderPassForRestarting(VkRenderPass pass)
 	{
-		for (const auto& it : m_render_pass_cache)
-		{
-			if (it.second != pass)
-				continue;
+		/* The pass's key, from the reverse map rather than a walk over
+		 * every pass made. */
+		const u32* key = static_cast<const u32*>(
+			gs_flat_map_find(&m_render_pass_keys, &pass, sizeof(pass), gs_key_hash(&pass, sizeof(pass))));
+		if (!key)
+			return pass;
 
-			RenderPassCacheKey modified_key;
-			modified_key.key = it.first;
-			if (modified_key.color_load_op == VK_ATTACHMENT_LOAD_OP_CLEAR)
-				modified_key.color_load_op = VK_ATTACHMENT_LOAD_OP_LOAD;
-			if (modified_key.depth_load_op == VK_ATTACHMENT_LOAD_OP_CLEAR)
-				modified_key.depth_load_op = VK_ATTACHMENT_LOAD_OP_LOAD;
-			if (modified_key.stencil_load_op == VK_ATTACHMENT_LOAD_OP_CLEAR)
-				modified_key.stencil_load_op = VK_ATTACHMENT_LOAD_OP_LOAD;
+		RenderPassCacheKey modified_key;
+		modified_key.key = *key;
+		if (modified_key.color_load_op == VK_ATTACHMENT_LOAD_OP_CLEAR)
+			modified_key.color_load_op = VK_ATTACHMENT_LOAD_OP_LOAD;
+		if (modified_key.depth_load_op == VK_ATTACHMENT_LOAD_OP_CLEAR)
+			modified_key.depth_load_op = VK_ATTACHMENT_LOAD_OP_LOAD;
+		if (modified_key.stencil_load_op == VK_ATTACHMENT_LOAD_OP_CLEAR)
+			modified_key.stencil_load_op = VK_ATTACHMENT_LOAD_OP_LOAD;
 
-			if (modified_key.key == it.first)
-				return pass;
+		if (modified_key.key == *key)
+			return pass;
 
-			auto fit = m_render_pass_cache.find(modified_key.key);
-			if (fit != m_render_pass_cache.end())
-				return fit->second;
+		const VkRenderPass* rp = static_cast<const VkRenderPass*>(vk_u32_find(&m_render_pass_cache, modified_key.key));
+		if (rp)
+			return *rp;
 
-			return CreateCachedRenderPass(modified_key);
-		}
-
-		return pass;
+		return CreateCachedRenderPass(modified_key);
 	}
 
 	VkCommandBuffer GSDeviceVK::GetCurrentInitCommandBuffer()
@@ -1154,6 +1188,62 @@ static void SafeDestroyDescriptorSetLayout(VkDevice dev, VkDescriptorSetLayout& 
 		vkBeginCommandBuffer(buf, &bi);
 		res.init_buffer_used = true;
 		return buf;
+	}
+
+	struct ds_key_view { u64 view0; u64 view1; u64 sampler; u32 layout0; u32 layout1; };
+	static u32 ds_key_hash(const void* key_)
+	{
+		const struct ds_key_view* key = (const struct ds_key_view*)key_;
+		u64 h = key->view0 * 0x9E3779B97F4A7C15ull;
+		h ^= key->view1 + 0x7F4A7C15ull + (h << 6) + (h >> 2);
+		h ^= key->sampler + (h << 6) + (h >> 2);
+		h ^= ((u64)key->layout0 << 32 | key->layout1) + (h << 6) + (h >> 2);
+		return (u32)(h >> 32) ^ (u32)h;
+	}
+
+	static bool ds_key_equal(const void* a_, const void* b_)
+	{
+		const struct ds_key_view* a = (const struct ds_key_view*)a_;
+		const struct ds_key_view* b = (const struct ds_key_view*)b_;
+		return a->view0 == b->view0 && a->view1 == b->view1 && a->sampler == b->sampler &&
+			a->layout0 == b->layout0 && a->layout1 == b->layout1;
+	}
+
+	VkDescriptorSet GSDeviceVK::FindCachedDescriptorSet(const FrameResources::DescriptorSetKey* key) const
+	{
+		const FrameResources& resources = m_frame_resources[m_current_frame];
+		u32 i = ds_key_hash(key) & (FrameResources::DS_CACHE_SIZE - 1);
+		u32 n;
+		for (n = 0; n < FrameResources::DS_CACHE_SIZE; n++, i = (i + 1) & (FrameResources::DS_CACHE_SIZE - 1))
+		{
+			const FrameResources::DescriptorSetEntry* e = &resources.ds_cache[i];
+			if (e->set == VK_NULL_HANDLE)
+				return VK_NULL_HANDLE;
+			if (ds_key_equal(&e->key, key))
+				return e->set;
+		}
+		return VK_NULL_HANDLE;
+	}
+
+	/* A full table (a frame of more distinct bindings than slots) keeps
+	 * what it has; the rest allocate as before. */
+	void GSDeviceVK::CacheDescriptorSet(const FrameResources::DescriptorSetKey* key, VkDescriptorSet set)
+	{
+		FrameResources& resources = m_frame_resources[m_current_frame];
+		u32 i = ds_key_hash(key) & (FrameResources::DS_CACHE_SIZE - 1);
+		u32 n;
+		if (resources.ds_cache_used >= FrameResources::DS_CACHE_SIZE / 2)
+			return;
+		for (n = 0; n < FrameResources::DS_CACHE_SIZE; n++, i = (i + 1) & (FrameResources::DS_CACHE_SIZE - 1))
+		{
+			FrameResources::DescriptorSetEntry* e = &resources.ds_cache[i];
+			if (e->set != VK_NULL_HANDLE)
+				continue;
+			e->key = *key;
+			e->set = set;
+			resources.ds_cache_used++;
+			return;
+		}
 	}
 
 	VkDescriptorSet GSDeviceVK::AllocateDescriptorSet(VkDescriptorSetLayout set_layout)
@@ -1264,7 +1354,7 @@ static void SafeDestroyDescriptorSetLayout(VkDevice dev, VkDescriptorSetLayout& 
 		// This command buffer now has commands, so can't be re-used without waiting.
 		VkSubmitInfo submit_info       = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
 		submit_info.commandBufferCount = resources.init_buffer_used ? 2u : 1u;
-		submit_info.pCommandBuffers    = resources.init_buffer_used ? resources.command_buffers.data() : &resources.command_buffers[1];
+		submit_info.pCommandBuffers    = resources.init_buffer_used ? resources.command_buffers : &resources.command_buffers[1];
 
 		res = vkQueueSubmit(m_graphics_queue, 1, &submit_info, resources.fence);
 		if (res != VK_SUCCESS)
@@ -1275,8 +1365,9 @@ static void SafeDestroyDescriptorSetLayout(VkDevice dev, VkDescriptorSetLayout& 
 	{
 		FrameResources& resources = m_frame_resources[index];
 
-		for (const FrameResources::CleanupEntry& it : resources.cleanup_resources)
+		for (size_t n = 0; n < resources.cleanup_resources.count; n++)
 		{
+			const FrameResources::CleanupEntry& it = GS_ARRAY_AT(&resources.cleanup_resources, FrameResources::CleanupEntry, n);
 			switch (it.kind)
 			{
 				case FrameResources::CleanupKind::Buffer:
@@ -1304,17 +1395,30 @@ static void SafeDestroyDescriptorSetLayout(VkDevice dev, VkDescriptorSetLayout& 
 		}
 		/* The GPU is done reading these, so they are free to be handed
 		 * out again - back to the list, not to the driver. */
-		for (size_t i = 0; i < resources.staging_in_flight.size(); i++)
+		for (size_t i = 0; i < resources.staging_in_flight.count; i++)
 		{
-			const u64 sz = resources.staging_in_flight[i].size;
-			m_staging_free.push_back(resources.staging_in_flight[i]);
+			const StagingBuffer& sb = GS_ARRAY_AT(&resources.staging_in_flight, StagingBuffer, i);
+			const u64 sz = sb.size;
+			StagingBuffer* freed = static_cast<StagingBuffer*>(gs_array_push(&m_staging_free));
+			if (!freed)
+			{
+				/* (no room on the free list: back to the driver instead) */
+				vkDestroyBuffer(vk_init_info.device, sb.buffer, nullptr);
+				gs_vk_heap_free(&m_heap, &sb.alloc);
+				if (m_staging_inflight_bytes >= sz)
+					m_staging_inflight_bytes -= sz;
+				else
+					m_staging_inflight_bytes = 0;
+				continue;
+			}
+			*freed = sb;
 			m_staging_bytes += sz;
 			if (m_staging_inflight_bytes >= sz)
 				m_staging_inflight_bytes -= sz;
 			else
 				m_staging_inflight_bytes = 0;
 		}
-		resources.staging_in_flight.clear();
+		resources.staging_in_flight.count = 0;
 		resources.staging_bytes = 0;
 
 		if (m_deferred_bytes >= resources.cleanup_bytes)
@@ -1322,7 +1426,16 @@ static void SafeDestroyDescriptorSetLayout(VkDevice dev, VkDescriptorSetLayout& 
 		else
 			m_deferred_bytes = 0;
 		resources.cleanup_bytes = 0;
-		resources.cleanup_resources.clear();
+		resources.cleanup_resources.count = 0;
+	}
+
+	/* A slot on the current command buffer's cleanup list. */
+	GSDeviceVK::FrameResources::CleanupEntry* GSDeviceVK::PushCleanup()
+	{
+		void* slot = gs_array_push(&m_frame_resources[m_current_frame].cleanup_resources);
+		if (!slot)
+			abort();
+		return static_cast<FrameResources::CleanupEntry*>(slot);
 	}
 
 	void GSDeviceVK::MoveToNextCommandBuffer()
@@ -1353,6 +1466,11 @@ static void SafeDestroyDescriptorSetLayout(VkDevice dev, VkDescriptorSetLayout& 
 
 		// Also can do the same for the descriptor pools
 		vkResetDescriptorPool(m_device, resources.descriptor_pool, 0);
+		if (resources.ds_cache_used)
+		{
+			memset(resources.ds_cache, 0, sizeof(resources.ds_cache));
+			resources.ds_cache_used = 0;
+		}
 
 		resources.fence_counter = m_next_fence_counter++;
 		resources.init_buffer_used = false;
@@ -1364,37 +1482,42 @@ static void SafeDestroyDescriptorSetLayout(VkDevice dev, VkDescriptorSetLayout& 
 
 	void GSDeviceVK::DeferBufferDestruction(VkBuffer object)
 	{
-		FrameResources& resources = m_frame_resources[m_current_frame];
-		resources.cleanup_resources.push_back({
-			FrameResources::CleanupKind::Buffer, (u64)object, gs_vk_alloc_t{}});
+		FrameResources::CleanupEntry* e = PushCleanup();
+		e->kind = FrameResources::CleanupKind::Buffer;
+		e->h0   = (u64)object;
+		memset(&e->alloc, 0, sizeof(e->alloc));
 	}
 
 	void GSDeviceVK::DeferBufferDestruction(VkBuffer object, const gs_vk_alloc_t& alloc)
 	{
-		FrameResources& resources = m_frame_resources[m_current_frame];
-		resources.cleanup_resources.push_back({
-			FrameResources::CleanupKind::BufferHeap, (u64)object, alloc});
+		FrameResources::CleanupEntry* e = PushCleanup();
+		e->kind = FrameResources::CleanupKind::BufferHeap;
+		e->h0   = (u64)object;
+		e->alloc = alloc;
 	}
 
 	void GSDeviceVK::DeferFramebufferDestruction(VkFramebuffer object)
 	{
-		FrameResources& resources = m_frame_resources[m_current_frame];
-		resources.cleanup_resources.push_back({
-			FrameResources::CleanupKind::Framebuffer, (u64)object, gs_vk_alloc_t{}});
+		FrameResources::CleanupEntry* e = PushCleanup();
+		e->kind = FrameResources::CleanupKind::Framebuffer;
+		e->h0   = (u64)object;
+		memset(&e->alloc, 0, sizeof(e->alloc));
 	}
 
 	void GSDeviceVK::DeferImageDestruction(VkImage object)
 	{
-		FrameResources& resources = m_frame_resources[m_current_frame];
-		resources.cleanup_resources.push_back({
-			FrameResources::CleanupKind::Image, (u64)object, gs_vk_alloc_t{}});
+		FrameResources::CleanupEntry* e = PushCleanup();
+		e->kind = FrameResources::CleanupKind::Image;
+		e->h0   = (u64)object;
+		memset(&e->alloc, 0, sizeof(e->alloc));
 	}
 
 	void GSDeviceVK::DeferImageDestruction(VkImage object, const gs_vk_alloc_t& alloc)
 	{
-		FrameResources& resources = m_frame_resources[m_current_frame];
-		resources.cleanup_resources.push_back({
-			FrameResources::CleanupKind::ImageHeap, (u64)object, alloc});
+		FrameResources::CleanupEntry* e = PushCleanup();
+		e->kind = FrameResources::CleanupKind::ImageHeap;
+		e->h0   = (u64)object;
+		e->alloc = alloc;
 	}
 
 	/* --- how much may be waiting to be freed ---------------------------
@@ -1470,17 +1593,22 @@ static void SafeDestroyDescriptorSetLayout(VkDevice dev, VkDescriptorSetLayout& 
 		if (m_staging_bytes + m_staging_inflight_bytes + want > ceiling)
 			RelieveMemPressure(MEM_PRESSURE_WAIT);
 
-		for (i = 0; i < m_staging_free.size(); i++)
+		for (i = 0; i < m_staging_free.count; i++)
 		{
-			if (m_staging_free[i].size < want)
+			StagingBuffer* free_list = GS_ARRAY_ITEMS(&m_staging_free, StagingBuffer);
+			StagingBuffer* in_flight;
+			if (free_list[i].size < want)
 				continue;
-			sb = m_staging_free[i];
-			m_staging_free[i] = m_staging_free.back();
-			m_staging_free.pop_back();
+			in_flight = static_cast<StagingBuffer*>(gs_array_push(&m_frame_resources[m_current_frame].staging_in_flight));
+			if (!in_flight)
+				return VK_NULL_HANDLE;
+			sb = free_list[i];
+			free_list[i] = free_list[m_staging_free.count - 1];
+			m_staging_free.count--;
 			m_staging_bytes -= sb.size;
 			m_staging_inflight_bytes += sb.size;
 			m_frame_resources[m_current_frame].staging_bytes += sb.size;
-			m_frame_resources[m_current_frame].staging_in_flight.push_back(sb);
+			*in_flight = sb;
 			*mapped    = sb.mapped;
 			*alloc_out = sb.alloc;
 			return sb.buffer;
@@ -1498,19 +1626,28 @@ static void SafeDestroyDescriptorSetLayout(VkDevice dev, VkDescriptorSetLayout& 
 			return VK_NULL_HANDLE;
 
 		sb.size = want;
+		{
+			StagingBuffer* in_flight = static_cast<StagingBuffer*>(gs_array_push(&m_frame_resources[m_current_frame].staging_in_flight));
+			if (!in_flight)
+			{
+				vkDestroyBuffer(vk_init_info.device, sb.buffer, nullptr);
+				gs_vk_heap_free(&m_heap, &sb.alloc);
+				return VK_NULL_HANDLE;
+			}
+			*in_flight = sb;
+		}
 		m_staging_inflight_bytes += sb.size;
 		m_frame_resources[m_current_frame].staging_bytes += sb.size;
-		m_frame_resources[m_current_frame].staging_in_flight.push_back(sb);
 
 		/* Trim the free list against the same total. */
 		while (m_staging_bytes + m_staging_inflight_bytes > ceiling
-				&& !m_staging_free.empty())
+				&& m_staging_free.count > 0)
 		{
-			StagingBuffer& dead = m_staging_free.back();
+			StagingBuffer& dead = GS_ARRAY_AT(&m_staging_free, StagingBuffer, m_staging_free.count - 1);
 			m_staging_bytes -= dead.size;
 			vkDestroyBuffer(vk_init_info.device, dead.buffer, nullptr);
 			gs_vk_heap_free(&m_heap, &dead.alloc);
-			m_staging_free.pop_back();
+			m_staging_free.count--;
 		}
 
 		*mapped    = sb.mapped;
@@ -1523,22 +1660,24 @@ static void SafeDestroyDescriptorSetLayout(VkDevice dev, VkDescriptorSetLayout& 
 		size_t i;
 		u32 f;
 
-		for (i = 0; i < m_staging_free.size(); i++)
+		for (i = 0; i < m_staging_free.count; i++)
 		{
-			vkDestroyBuffer(vk_init_info.device, m_staging_free[i].buffer, nullptr);
-			gs_vk_heap_free(&m_heap, &m_staging_free[i].alloc);
+			StagingBuffer& sb = GS_ARRAY_AT(&m_staging_free, StagingBuffer, i);
+			vkDestroyBuffer(vk_init_info.device, sb.buffer, nullptr);
+			gs_vk_heap_free(&m_heap, &sb.alloc);
 		}
-		m_staging_free.clear();
+		m_staging_free.count = 0;
 
 		for (f = 0; f < NUM_COMMAND_BUFFERS; f++)
 		{
-			std::vector<StagingBuffer>& v = m_frame_resources[f].staging_in_flight;
-			for (i = 0; i < v.size(); i++)
+			gs_array_t* v = &m_frame_resources[f].staging_in_flight;
+			for (i = 0; i < v->count; i++)
 			{
-				vkDestroyBuffer(vk_init_info.device, v[i].buffer, nullptr);
-				gs_vk_heap_free(&m_heap, &v[i].alloc);
+				StagingBuffer& sb = GS_ARRAY_AT(v, StagingBuffer, i);
+				vkDestroyBuffer(vk_init_info.device, sb.buffer, nullptr);
+				gs_vk_heap_free(&m_heap, &sb.alloc);
 			}
-			v.clear();
+			v->count = 0;
 			m_frame_resources[f].staging_bytes = 0;
 			m_staging_inflight_bytes = 0;
 		}
@@ -1586,9 +1725,10 @@ static void SafeDestroyDescriptorSetLayout(VkDevice dev, VkDescriptorSetLayout& 
 
 	void GSDeviceVK::DeferImageViewDestruction(VkImageView object)
 	{
-		FrameResources& resources = m_frame_resources[m_current_frame];
-		resources.cleanup_resources.push_back({
-			FrameResources::CleanupKind::ImageView, (u64)object, gs_vk_alloc_t{}});
+		FrameResources::CleanupEntry* e = PushCleanup();
+		e->kind = FrameResources::CleanupKind::ImageView;
+		e->h0   = (u64)object;
+		memset(&e->alloc, 0, sizeof(e->alloc));
 	}
 
 	VkRenderPass GSDeviceVK::CreateCachedRenderPass(RenderPassCacheKey key)
@@ -1601,7 +1741,7 @@ static void SafeDestroyDescriptorSetLayout(VkDevice dev, VkDescriptorSetLayout& 
 		VkAttachmentReference* input_reference_ptr = nullptr;
 		VkSubpassDependency subpass_dependency;
 		VkSubpassDependency* subpass_dependency_ptr = nullptr;
-		std::array<VkAttachmentDescription, 2> attachments;
+		VkAttachmentDescription attachments[2];
 		u32 num_attachments = 0;
 		if (key.color_format != VK_FORMAT_UNDEFINED)
 		{
@@ -1660,7 +1800,7 @@ static void SafeDestroyDescriptorSetLayout(VkDevice dev, VkDescriptorSetLayout& 
 			input_reference_ptr ? input_reference_ptr : nullptr, color_reference_ptr ? 1u : 0u,
 			color_reference_ptr ? color_reference_ptr : nullptr, nullptr, depth_reference_ptr, 0, nullptr};
 		const VkRenderPassCreateInfo pass_info = {VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, nullptr, 0u,
-			num_attachments, attachments.data(), 1u, &subpass, subpass_dependency_ptr ? 1u : 0u,
+			num_attachments, attachments, 1u, &subpass, subpass_dependency_ptr ? 1u : 0u,
 			subpass_dependency_ptr};
 
 		VkRenderPass pass;
@@ -1668,12 +1808,23 @@ static void SafeDestroyDescriptorSetLayout(VkDevice dev, VkDescriptorSetLayout& 
 		if (res != VK_SUCCESS)
 			return VK_NULL_HANDLE;
 
-		m_render_pass_cache.emplace(key.key, pass);
+		{
+			int inserted;
+			VkRenderPass* rp = static_cast<VkRenderPass*>(vk_u32_entry(&m_render_pass_cache, key.key, &inserted));
+			u32* back = static_cast<u32*>(gs_flat_map_insert(&m_render_pass_keys, &pass, gs_key_hash(&pass, sizeof(pass)), &inserted));
+			if (!rp || !back)
+			{
+				vkDestroyRenderPass(vk_init_info.device, pass, nullptr);
+				return VK_NULL_HANDLE;
+			}
+			*rp   = pass;
+			*back = key.key;
+		}
 		return pass;
 	}
 
 	bool GSDeviceVK::AllocatePreinitializedGPUBuffer(u32 size, VkBuffer* gpu_buffer, gs_vk_alloc_t* gpu_alloc,
-		VkBufferUsageFlags gpu_usage, const std::function<void(void*)>& fill_callback)
+		VkBufferUsageFlags gpu_usage, void (*fill_callback)(void* mapped))
 	{
 		// Try to place the fixed index buffer in GPU local memory.
 		// Use the staging buffer to copy into it.
@@ -1755,55 +1906,41 @@ GSDeviceVK::GSDeviceVK()
 {
 	m_ops = &s_vulkan_device_ops;
 	memset(&m_pipeline_selector, 0, sizeof(m_pipeline_selector));
+	gs_flat_map_init(&m_tfx_pipelines, sizeof(PipelineSelector), sizeof(VkPipeline));
+	gs_flat_map_init(&m_tfx_siblings, sizeof(PipelineSelector), sizeof(VkPipeline));
+	gs_flat_map_init(&m_tfx_pending, sizeof(PipelineSelector), 1);
+	gs_flat_map_init(&m_tfx_test_order, sizeof(PipelineSelector), 1);
+	gs_flat_map_init(&m_tfx_fs_libs, sizeof(PipelineSelector), sizeof(VkPipeline));
+	gs_flat_map_init(&m_tfx_state_libs, sizeof(PipelineSelector), sizeof(VkPipeline));
+	gs_flat_map_init(&m_samplers, sizeof(u32), sizeof(VkSampler));
+	gs_flat_map_init(&m_render_pass_cache, sizeof(u32), sizeof(VkRenderPass));
+	gs_flat_map_init(&m_render_pass_keys, sizeof(VkRenderPass), sizeof(u32));
+	gs_array_init(&m_staging_free, sizeof(StagingBuffer));
+	for (u32 f = 0; f < NUM_COMMAND_BUFFERS; f++)
+	{
+		gs_array_init(&m_frame_resources[f].staging_in_flight, sizeof(StagingBuffer));
+		gs_array_init(&m_frame_resources[f].cleanup_resources, sizeof(FrameResources::CleanupEntry));
+	}
 }
 
 GSDeviceVK::~GSDeviceVK()
 {
-}
-
-void GSDeviceVK::GetAdapters(std::vector<std::string>* adapters)
-{
-	VkInstance instance = vk_init_info.instance;
-	if (Vulkan::LoadVulkanLibrary())
+	/* (the handles in them went with the device; these are the slots) */
+	gs_array_free(&m_staging_free);
+	for (u32 f = 0; f < NUM_COMMAND_BUFFERS; f++)
 	{
-		if (instance != VK_NULL_HANDLE)
-		{
-			if (adapters && Vulkan::LoadVulkanInstanceFunctions(instance))
-				*adapters = EnumerateGPUNames(instance);
-		}
-		Vulkan::UnloadVulkanLibrary();
+		gs_array_free(&m_frame_resources[f].staging_in_flight);
+		gs_array_free(&m_frame_resources[f].cleanup_resources);
 	}
-}
-
-bool GSDeviceVK::IsSuitableDefaultRenderer()
-{
-	std::vector<std::string> adapters;
-	GetAdapters(&adapters);
-	if (adapters.empty())
-		return false;
-
-	// Check the first GPU, should be enough.
-	const std::string& name = adapters.front();
-	log_cb(RETRO_LOG_INFO, "Using Vulkan GPU '{%s}' for automatic renderer check.\n", name.c_str());
-
-	// Any software rendering (LLVMpipe, SwiftShader).
-	if (       StringView::StartsWithNoCase(name, "llvmpipe")
-		|| StringView::StartsWithNoCase(name, "SwiftShader"))
-	{
-		log_cb(RETRO_LOG_WARN, "Not using Vulkan for software renderer.\n");
-		return false;
-	}
-
-	// For Intel, OpenGL usually ends up faster on Linux, because of fbfetch.
-	// Plus, the Ivy Bridge and Haswell drivers are incomplete.
-	if (StringView::StartsWithNoCase(name, "Intel"))
-	{
-		log_cb(RETRO_LOG_WARN, "Not using Vulkan for Intel GPU.\n");
-		return false;
-	}
-
-	log_cb(RETRO_LOG_INFO, "Allowing Vulkan as default renderer.\n");
-	return true;
+	gs_flat_map_free(&m_tfx_pipelines);
+	gs_flat_map_free(&m_tfx_siblings);
+	gs_flat_map_free(&m_tfx_pending);
+	gs_flat_map_free(&m_tfx_test_order);
+	gs_flat_map_free(&m_tfx_fs_libs);
+	gs_flat_map_free(&m_tfx_state_libs);
+	gs_flat_map_free(&m_samplers);
+	gs_flat_map_free(&m_render_pass_cache);
+	gs_flat_map_free(&m_render_pass_keys);
 }
 
 RenderAPI GSDeviceVK::GetRenderAPI() const
@@ -1850,11 +1987,12 @@ bool GSDeviceVK::Create()
 	/* LRPS2_TEST_VK_PIPELINES=sync: every TFX pipeline built on the render
 	 * thread as it is first drawn with; =sibling: every draw drawn with a
 	 * dynamic sibling; =async: every new key drawn with its sibling while
-	 * the warm-up thread builds its own. */
+	 * the warm-up thread builds its own; =mixed: every other key drawn
+	 * with its sibling, the rest with pipelines of their own. */
 	{
 		const char* mode = getenv("LRPS2_TEST_VK_PIPELINES");
 		m_test_pipelines = !mode ? 0 : !strcmp(mode, "sync") ? 1 : !strcmp(mode, "sibling") ? 2
-			: !strcmp(mode, "async") ? 3 : 0;
+			: !strcmp(mode, "async") ? 3 : !strcmp(mode, "mixed") ? 4 : 0;
 	}
 
 	if (!CreateRenderPasses() || !UtilPrepare())
@@ -1953,9 +2091,13 @@ void GSDeviceVK::Destroy()
 
 	m_texture_upload_buffer.Destroy(false);
 
-	for (auto& it : m_render_pass_cache)
-		vkDestroyRenderPass(m_device, it.second, nullptr);
-	m_render_pass_cache.clear();
+	for (size_t i = 0; i < GS_FLAT_MAP_SLOTS(&m_render_pass_cache); i++)
+	{
+		if (GS_FLAT_MAP_USED(&m_render_pass_cache, i))
+			vkDestroyRenderPass(m_device, *static_cast<VkRenderPass*>(GS_FLAT_MAP_VALUE(&m_render_pass_cache, i)), nullptr);
+	}
+	gs_flat_map_free(&m_render_pass_cache);
+	gs_flat_map_free(&m_render_pass_keys);
 
 	if (m_global_descriptor_pool != VK_NULL_HANDLE)
 		vkDestroyDescriptorPool(m_device, m_global_descriptor_pool, nullptr);
@@ -2036,6 +2178,13 @@ bool GSDeviceVK::CreateDeviceAndSwapChain()
 		pcsx2_max_i(m_device_properties.limits.bufferImageGranularity, static_cast<VkDeviceSize>(32));
 
 	AcquireWindow();
+
+	/* The entry points through the frontend's vkGetInstanceProcAddr, as
+	 * the libretro Vulkan interface asks: a frontend that wraps the
+	 * loader's (one counting the calls, say) sees every call made. */
+	if (vk_init_info.vkGetInstanceProcAddr &&
+		vk_init_info.vkGetInstanceProcAddr != vkGetInstanceProcAddr_libretro)
+		vkGetInstanceProcAddr_org = vk_init_info.vkGetInstanceProcAddr;
 
 	if (!Vulkan::LoadVulkanInstanceFunctions(vk_init_info.instance))
 	{
@@ -2164,7 +2313,7 @@ void GSDeviceVK::DrawIndexedPrimitive(int offset, int count)
 
 VkFormat GSDeviceVK::LookupNativeFormat(GSTexture::Format format) const
 {
-	static constexpr std::array<VkFormat, static_cast<int>(GSTexture::Format::BC7) + 1> s_format_mapping = {{
+	static constexpr VkFormat s_format_mapping[static_cast<int>(GSTexture::Format::BC7) + 1] = {
 		VK_FORMAT_UNDEFINED, // Invalid
 		VK_FORMAT_R8G8B8A8_UNORM, // Color
 		VK_FORMAT_R16G16B16A16_UNORM, // ColorClip
@@ -2177,7 +2326,7 @@ VkFormat GSDeviceVK::LookupNativeFormat(GSTexture::Format format) const
 		VK_FORMAT_BC2_UNORM_BLOCK, // BC2
 		VK_FORMAT_BC3_UNORM_BLOCK, // BC3
 		VK_FORMAT_BC7_UNORM_BLOCK, // BC7
-	}};
+	};
 
 	return (format != GSTexture::Format::DepthStencil || m_features.stencil_buffer) ?
                s_format_mapping[static_cast<int>(format)] :
@@ -2190,7 +2339,7 @@ GSTexture* GSDeviceVK::CreateSurface(GSTexture::Type type, int width, int height
 	const u32 clamped_width  = static_cast<u32>(pcsx2_clamp_i(width, 1, max_img_dim));
 	const u32 clamped_height = static_cast<u32>(pcsx2_clamp_i(height, 1, max_img_dim));
 
-	std::unique_ptr<GSTextureVK> tex(GSTextureVK::Create(type, format, clamped_width, clamped_height, levels));
+	GSTextureVK* tex = GSTextureVK::Create(type, format, clamped_width, clamped_height, levels);
 	if (!tex)
 	{
 		// We're probably out of vram, try flushing the command buffer to release pending textures.
@@ -2200,12 +2349,12 @@ GSTexture* GSDeviceVK::CreateSurface(GSTexture::Type type, int width, int height
 		tex = GSTextureVK::Create(type, format, clamped_width, clamped_height, levels);
 	}
 
-	return tex.release();
+	return tex;
 }
 
-GSDownloadTexturePtr GSDeviceVK::CreateDownloadTexture(u32 width, u32 height, GSTexture::Format format)
+GSDownloadTexture* GSDeviceVK::CreateDownloadTexture(u32 width, u32 height, GSTexture::Format format)
 {
-	return GSDownloadTexturePtr(GSDownloadTextureVK::Create(width, height, format).release());
+	return GSDownloadTextureVK::Create(width, height, format);
 }
 
 void GSDeviceVK::CopyRect(GSTexture* sTex, GSTexture* dTex, const GSVector4i& r, u32 destX, u32 destY)
@@ -2626,23 +2775,24 @@ void GSDeviceVK::DrawStretchRect(const GSVector4& sRect, const GSVector4& dRect,
 		DrawPrimitive();
 }
 
-void GSDeviceVK::UpdateCLUTTexture(GSTexture* sTex, float sScale, u32 offsetX, u32 offsetY, GSTexture* dTex, u32 dOffset, u32 dSize, u32 samples)
+void GSDeviceVK::UpdateCLUTTexture(GSTexture* sTex, float sScale, float sSample, u32 offsetX, u32 offsetY, GSTexture* dTex, u32 dOffset, u32 dSize)
 {
 	// Super annoying, but apparently NVIDIA doesn't like floats/ints packed together in the same vec4?
 	struct Uniforms
 	{
-		u32 offsetX, offsetY, dOffset, samples;
+		u32 offsetX, offsetY, dOffset;
+		float sample;
 		float scale;
 		float pad2[3];
 	};
 
-	const Uniforms uniforms = {offsetX, offsetY, dOffset, samples, sScale, {}};
+	const Uniforms uniforms = {offsetX, offsetY, dOffset, sSample, sScale, {}};
 	SetUtilityPushConstants(&uniforms, sizeof(uniforms));
 
-	const GSVector4 dRect(0, 0, dSize * samples, samples);
+	const GSVector4 dRect(0, 0, dSize, 1);
 	const ShaderConvert shader = (dSize == 16) ? ShaderConvert::CLUT_4 : ShaderConvert::CLUT_8;
 	DoStretchRect(static_cast<GSTextureVK*>(sTex), GSVector4::zero(), static_cast<GSTextureVK*>(dTex), dRect,
-		Util(UP_CONVERT + static_cast<u32>(shader)), false, true);
+		Util(UP_CONVERT + static_cast<u32>(shader)), true, true);
 }
 
 void GSDeviceVK::ConvertToIndexedTexture(GSTexture* sTex, float sScale, u32 offsetX, u32 offsetY, u32 SBW, u32 SPSM, GSTexture* dTex, u32 DBW, u32 DPSM)
@@ -2973,7 +3123,7 @@ void GSDeviceVK::OMSetRenderTargets(GSTexture* rt, GSTexture* ds, const GSVector
 		}
 		else
 		{
-			std::array<VkClearAttachment, 2> cas;
+			VkClearAttachment cas[2];
 			u32 num_ca = 0;
 			if (vkRt && vkRt->GetState() != GSTexture::State::Dirty)
 			{
@@ -3004,7 +3154,7 @@ void GSDeviceVK::OMSetRenderTargets(GSTexture* rt, GSTexture* ds, const GSVector
 			{
 				const GSVector2i size = vkRt ? vkRt->GetSize() : vkDs->GetSize();
 				const VkClearRect cr = {{{0, 0}, {static_cast<u32>(size.x), static_cast<u32>(size.y)}}, 0u, 1u};
-				vkCmdClearAttachments(GetCurrentCommandBuffer(), num_ca, cas.data(), 1, &cr);
+				vkCmdClearAttachments(GetCurrentCommandBuffer(), num_ca, cas, 1, &cr);
 			}
 		}
 	}
@@ -3065,9 +3215,9 @@ void GSDeviceVK::OMSetRenderTargets(GSTexture* rt, GSTexture* ds, const GSVector
 
 VkSampler GSDeviceVK::GetSampler(GSHWDrawConfig::SamplerSelector ss)
 {
-	const auto it = m_samplers.find(ss.key);
-	if (it != m_samplers.end())
-		return it->second;
+	const VkSampler* found = static_cast<const VkSampler*>(vk_u32_find(&m_samplers, ss.key));
+	if (found)
+		return *found;
 
 	const bool aniso = (ss.aniso && GSConfig.MaxAnisotropy > 1 && m_device_features.samplerAnisotropy);
 
@@ -3096,20 +3246,34 @@ VkSampler GSDeviceVK::GetSampler(GSHWDrawConfig::SamplerSelector ss)
 	VkSampler sampler = VK_NULL_HANDLE;
 	vkCreateSampler(vk_init_info.device, &ci, nullptr, &sampler);
 
-	m_samplers.emplace(ss.key, sampler);
+	{
+		int inserted;
+		VkSampler* slot = static_cast<VkSampler*>(vk_u32_entry(&m_samplers, ss.key, &inserted));
+		if (slot)
+			*slot = sampler;
+	}
 	return sampler;
+}
+
+void GSDeviceVK::DestroySamplers()
+{
+	size_t i;
+	for (i = 0; i < GS_FLAT_MAP_SLOTS(&m_samplers); i++)
+	{
+		if (!GS_FLAT_MAP_USED(&m_samplers, i))
+			continue;
+		const VkSampler samp = *static_cast<VkSampler*>(GS_FLAT_MAP_VALUE(&m_samplers, i));
+		if (samp != VK_NULL_HANDLE)
+			vkDestroySampler(vk_init_info.device, samp, nullptr);
+	}
+	gs_flat_map_free(&m_samplers);
 }
 
 void GSDeviceVK::ClearSamplerCache()
 {
 	VkDevice m_device = vk_init_info.device;
 	ExecuteCommandBuffer(true);
-	for (const auto& it : m_samplers)
-	{
-		if (it.second != VK_NULL_HANDLE)
-			vkDestroySampler(m_device, it.second, nullptr);
-	}
-	m_samplers.clear();
+	DestroySamplers();
 	m_point_sampler   = GetSampler(GSHWDrawConfig::SamplerSelector::Point());
 	m_linear_sampler  = GetSampler(GSHWDrawConfig::SamplerSelector::Linear());
 	m_utility_sampler = m_point_sampler;
@@ -3671,31 +3835,14 @@ void GSDeviceVK::DestroyResources()
 		FreeGlobalDescriptorSet(m_tfx_ubo_descriptor_set);
 
 	m_last_tfx_pipeline = VK_NULL_HANDLE;
-	for (auto& it : m_tfx_pipelines)
-	{
-		VkPipeline& p = it.second;
-		if (p != VK_NULL_HANDLE)
-		{
-			vkDestroyPipeline(m_device, p, nullptr);
-			p = VK_NULL_HANDLE;
-		}
-	}
-	m_tfx_pipelines.clear();
-	for (auto& it : m_tfx_siblings)
-		if (it.second != VK_NULL_HANDLE)
-			vkDestroyPipeline(m_device, it.second, nullptr);
-	m_tfx_siblings.clear();
-	for (auto& it : m_tfx_fs_libs)
-		if (it.second != VK_NULL_HANDLE)
-			vkDestroyPipeline(m_device, it.second, nullptr);
-	m_tfx_fs_libs.clear();
-	for (auto& it : m_tfx_state_libs)
-		if (it.second != VK_NULL_HANDLE)
-			vkDestroyPipeline(m_device, it.second, nullptr);
-	m_tfx_state_libs.clear();
+	vk_pipe_destroy_all(&m_tfx_pipelines);
+	vk_pipe_destroy_all(&m_tfx_siblings);
+	vk_pipe_destroy_all(&m_tfx_fs_libs);
+	vk_pipe_destroy_all(&m_tfx_state_libs);
 	m_gpl_failed = false;
-	m_tfx_pending.clear();
-	m_tfx_dynamic = false;
+	gs_flat_map_free(&m_tfx_pending);
+	m_tfx_dynamic   = false;
+	m_tfx_key_stale = true;
 	DestroyModules(&m_modules);
 	{
 		u32 i;
@@ -3709,15 +3856,9 @@ void GSDeviceVK::DestroyResources()
 	}
 	m_vr_ops = NULL;
 
-	for (auto& it : m_samplers)
-	{
-		VkSampler& samp = it.second;
-		if (samp != VK_NULL_HANDLE)
-		{
-			vkDestroySampler(m_device, samp, nullptr);
-			samp = VK_NULL_HANDLE;
-		}
-	}
+	/* Emptied too: the entries used to stay, each a null sampler that
+	 * GetSampler would have handed out. */
+	DestroySamplers();
 
 	m_linear_sampler = VK_NULL_HANDLE;
 	m_point_sampler = VK_NULL_HANDLE;
@@ -3752,28 +3893,28 @@ void GSDeviceVK::DestroyResources()
 	if (m_null_texture)
 	{
 		m_null_texture->Destroy(false);
-		m_null_texture.reset();
+		delete m_null_texture;
+		m_null_texture = nullptr;
 	}
 }
 
 // clang-format off
-static constexpr std::array<VkBlendFactor, 16> vk_blend_factors = { {
+static constexpr VkBlendFactor vk_blend_factors[16] = {
 	VK_BLEND_FACTOR_SRC_COLOR, VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR, VK_BLEND_FACTOR_DST_COLOR, VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR,
 	VK_BLEND_FACTOR_SRC1_COLOR, VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR, VK_BLEND_FACTOR_SRC_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
 	VK_BLEND_FACTOR_DST_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA, VK_BLEND_FACTOR_SRC1_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA,
 	VK_BLEND_FACTOR_CONSTANT_COLOR, VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO
-}};
+};
 /* [3]: the destination alpha test's first pass, which keeps the least */
-static constexpr std::array<VkBlendOp, 4> vk_blend_ops = {{
+static constexpr VkBlendOp vk_blend_ops[4] = {
 	VK_BLEND_OP_ADD, VK_BLEND_OP_SUBTRACT, VK_BLEND_OP_REVERSE_SUBTRACT, VK_BLEND_OP_MIN
-}};
+};
 // clang-format on
 
 /* The blend a selector draws with, as one word: enable (bit 0), colour
  * source and destination factor (1-4, 5-8, indexes of vk_blend_factors),
  * op (9-10, of vk_blend_ops), alpha source and destination factor (11-14,
- * 15-18), colour write mask (19-22). What BuildTFXPipeline bakes without
- * VK_EXT_extended_dynamic_state3, and ApplyBlendState sets with it. */
+ * 15-18), colour write mask (19-22): what BuildTFXPipeline bakes. */
 #define BLEND_ONE  14u
 #define BLEND_ZERO 15u
 static u32 TFXBlendWord(const GSDeviceVK::PipelineSelector& p)
@@ -3789,24 +3930,14 @@ static u32 TFXBlendWord(const GSDeviceVK::PipelineSelector& p)
 		| (static_cast<u32>(p.bs.dst_factor_alpha) << 15) | (static_cast<u32>(p.cms.wrgba) << 19);
 }
 
-/* The pixel shader a pipeline is made with: blending is off, and its second
- * output unused, when the colours are masked. */
-static GSHWDrawConfig::PSSelector TFXPipelinePS(const GSDeviceVK::PipelineSelector& p)
-{
-	GSHWDrawConfig::PSSelector pps{p.ps};
-	if (!p.bs.IsEffective(p.cms))
-		pps.no_color1 = true;
-	return pps;
-}
-
 VkPipeline GSDeviceVK::BuildTFXPipeline(const PipelineSelector& p, Modules* mods, VkPipelineCache cache,
 	bool dynamic, VkGraphicsPipelineLibraryFlagsEXT library) const
 {
-	static constexpr std::array<VkPrimitiveTopology, 3> topology_lookup = {{
+	static constexpr VkPrimitiveTopology topology_lookup[3] = {
 		VK_PRIMITIVE_TOPOLOGY_POINT_LIST, // Point
 		VK_PRIMITIVE_TOPOLOGY_LINE_LIST, // Line
 		VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, // Triangle
-	}};
+	};
 
 	Vulkan::GraphicsPipelineBuilder gpb;
 	SetPipelineProvokingVertex(m_features, gpb);
@@ -3846,7 +3977,11 @@ VkPipeline GSDeviceVK::BuildTFXPipeline(const PipelineSelector& p, Modules* mods
 	// Shaders: the modules of the selector's interface, its fields as
 	// their specialization constants (a dynamic sibling's pixel shader
 	// reads them from the push constants)
-	const GSHWDrawConfig::PSSelector pps = m_optional_extensions.vk_ext_extended_dynamic_state3 ? p.ps : TFXPipelinePS(p);
+	/* p is a key: its pixel selector says whether the second output is
+	 * used (TFXPipelineKey, a sibling's VKDynamicPS). A library's key has
+	 * no blend, which must not be read as none: the pixel shader part of
+	 * a sibling that blends with its second output is built with it. */
+	const GSHWDrawConfig::PSSelector& pps = p.ps;
 	// (a library's: only those of its parts)
 	const bool with_vs = !library || (library & VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT);
 	const bool with_fs = !library || (library & VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT);
@@ -3898,14 +4033,7 @@ VkPipeline GSDeviceVK::BuildTFXPipeline(const PipelineSelector& p, Modules* mods
 		gpb.SetStencilState(true, sos, sos);
 	}
 
-	// Blending: the word's, or from the command buffer
-	if (m_optional_extensions.vk_ext_extended_dynamic_state3)
-	{
-		gpb.AddDynamicState(VK_DYNAMIC_STATE_COLOR_BLEND_ENABLE_EXT);
-		gpb.AddDynamicState(VK_DYNAMIC_STATE_COLOR_BLEND_EQUATION_EXT);
-		gpb.AddDynamicState(VK_DYNAMIC_STATE_COLOR_WRITE_MASK_EXT);
-	}
-	else
+	// Blending: the word's
 	{
 		const u32 w = TFXBlendWord(p);
 		gpb.SetBlendAttachment(0, (w & 1u) != 0, vk_blend_factors[(w >> 1) & 15u], vk_blend_factors[(w >> 5) & 15u],
@@ -3927,10 +4055,9 @@ VkPipeline GSDeviceVK::BuildTFXPipeline(const PipelineSelector& p, Modules* mods
 
 /* The key of the pipeline a draw's selector needs: what BuildTFXPipeline
  * does not read zeroed, as the shaders' fields are (VKPipelineKey.h). The
- * line width and the blend constant are dynamic state, and the blend and
- * colour mask too with VK_EXT_extended_dynamic_state3; blending the colour
+ * line width and the blend constant are dynamic state; blending the colour
  * mask leaves without effect is built as none. */
-static GSDeviceVK::PipelineSelector TFXPipelineKey(const GSDeviceVK::PipelineSelector& p, bool dynamic_blend)
+static GSDeviceVK::PipelineSelector TFXPipelineKey(const GSDeviceVK::PipelineSelector& p)
 {
 	GSDeviceVK::PipelineSelector k{p};
 	k.line_width         = 0;
@@ -3940,13 +4067,6 @@ static GSDeviceVK::PipelineSelector TFXPipelineKey(const GSDeviceVK::PipelineSel
 	{
 		k.bs.key      = 0;
 		k.ps.no_color1 = 1;
-	}
-	/* (with the blend on the command buffer, none of it; the shader's
-	 * second output is kept above) */
-	if (dynamic_blend)
-	{
-		k.bs.key  = 0;
-		k.cms.key = 0;
 	}
 	VKCanonicalPS(k.ps);
 	VKCanonicalVS(k.vs, k.topology);
@@ -3960,14 +4080,14 @@ VkPipeline GSDeviceVK::GetTFXPipeline(const PipelineSelector& p)
 	if (m_last_tfx_pipeline != VK_NULL_HANDLE && m_last_tfx_pipeline_selector == p)
 		return m_last_tfx_pipeline;
 
-	const PipelineSelector key = TFXPipelineKey(p, m_optional_extensions.vk_ext_extended_dynamic_state3);
-	const auto it = m_tfx_pipelines.find(key);
+	const PipelineSelector key = TFXPipelineKey(p);
+	const VkPipeline* found = vk_pipe_find(&m_tfx_pipelines, key);
 	VkPipeline pipeline;
-	if (it == m_tfx_pipelines.end())
+	if (!found)
 		pipeline = GetTFXPipelineMissed(key);
 	else
 	{
-		pipeline      = it->second;
+		pipeline      = *found;
 		m_tfx_dynamic = false;
 	}
 
@@ -4016,16 +4136,17 @@ static GSDeviceVK::PipelineSelector TFXLibraryKey(const GSDeviceVK::PipelineSele
 VkPipeline GSDeviceVK::GetTFXLibrary(const PipelineSelector& sibling, bool fragment)
 {
 	const PipelineSelector lk = TFXLibraryKey(sibling, fragment);
-	auto& table = fragment ? m_tfx_fs_libs : m_tfx_state_libs;
-	const auto it = table.find(lk);
+	gs_flat_map_t* table = fragment ? &m_tfx_fs_libs : &m_tfx_state_libs;
+	const VkPipeline* found = vk_pipe_find(table, lk);
 	VkPipeline lib;
-	if (it != table.end() && (it->second != VK_NULL_HANDLE || fragment))
-		return it->second;
-	if (fragment && m_warm && m_test_pipelines != 3)
+	int inserted;
+	if (found && (*found != VK_NULL_HANDLE || fragment))
+		return *found;
+	if (fragment && m_warm && m_test_pipelines < 3)
 	{
 		/* (a null entry: asked for, or the thread could not take it) */
 		if (PipelineWarmQueue(lk, 2))
-			table.emplace(lk, VK_NULL_HANDLE);
+			vk_pipe_entry(table, lk, &inserted);
 		return VK_NULL_HANDLE;
 	}
 	lib = BuildTFXPipeline(lk, &m_modules, m_pipeline_cache, true,
@@ -4035,7 +4156,13 @@ VkPipeline GSDeviceVK::GetTFXLibrary(const PipelineSelector& sibling, bool fragm
 					| VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT));
 	if (lib != VK_NULL_HANDLE)
 	{
-		table[lk] = lib;
+		VkPipeline* slot = vk_pipe_entry(table, lk, &inserted);
+		if (!slot)
+		{
+			vkDestroyPipeline(vk_init_info.device, lib, nullptr);
+			return VK_NULL_HANDLE;
+		}
+		*slot = lib;
 		m_libs_built_here++;
 	}
 	return lib;
@@ -4045,15 +4172,17 @@ VkPipeline GSDeviceVK::GetTFXSibling(const PipelineSelector& key, bool build)
 {
 	PipelineSelector sk{key};
 	VKDynamicPS(sk.ps);
-	const auto it = m_tfx_siblings.find(sk);
+	const VkPipeline* found = vk_pipe_find(&m_tfx_siblings, sk);
 	VkPipeline sibling;
-	if (it != m_tfx_siblings.end() && (it->second != VK_NULL_HANDLE || !build))
-		return it->second;
+	VkPipeline* slot;
+	int inserted;
+	if (found && (*found != VK_NULL_HANDLE || !build))
+		return *found;
 	if (!build)
 	{
 		/* (a null entry: asked for, or the thread could not take it) */
 		if (PipelineWarmQueue(sk, 1))
-			m_tfx_siblings.emplace(sk, VK_NULL_HANDLE);
+			vk_pipe_entry(&m_tfx_siblings, sk, &inserted);
 		return VK_NULL_HANDLE;
 	}
 	/* Linked from its libraries, fast, where there are some: the pixel
@@ -4068,7 +4197,7 @@ VkPipeline GSDeviceVK::GetTFXSibling(const PipelineSelector& key, bool build)
 		/* the pixel shader part not there yet: the key's own pipeline is
 		 * built here as without libraries, the part on the way (or asked
 		 * for again by the next key, if the thread had no room) */
-		if (fs_lib == VK_NULL_HANDLE && m_warm && m_test_pipelines != 3)
+		if (fs_lib == VK_NULL_HANDLE && m_warm && m_test_pipelines < 3)
 			return VK_NULL_HANDLE;
 		if (libs[0] != VK_NULL_HANDLE && libs[1] != VK_NULL_HANDLE)
 		{
@@ -4087,7 +4216,14 @@ VkPipeline GSDeviceVK::GetTFXSibling(const PipelineSelector& key, bool build)
 	}
 	if (sibling == VK_NULL_HANDLE)
 		sibling = BuildTFXPipeline(sk, &m_modules, m_pipeline_cache, true);
-	m_tfx_siblings[sk] = sibling;
+	slot = vk_pipe_entry(&m_tfx_siblings, sk, &inserted);
+	if (!slot)
+	{
+		if (sibling != VK_NULL_HANDLE)
+			vkDestroyPipeline(vk_init_info.device, sibling, nullptr);
+		return VK_NULL_HANDLE;
+	}
+	*slot = sibling;
 	if (sibling != VK_NULL_HANDLE)
 		m_siblings_built_here++;
 	return sibling;
@@ -4113,28 +4249,56 @@ __noinline VkPipeline GSDeviceVK::GetTFXPipelineMissed(const PipelineSelector& p
 		if (pipeline != VK_NULL_HANDLE)
 			goto sibling;
 	}
+	/* (=mixed: every other key, in the order first drawn, drawn with its
+	 * sibling only and the rest with their own, built here: draws of
+	 * both in every command buffer, as the thread's make them now and
+	 * then) */
+	else if (m_test_pipelines == 4)
+	{
+		int inserted;
+		u8* odd = static_cast<u8*>(gs_flat_map_insert(&m_tfx_test_order, &p, gs_key_hash(&p, sizeof(p)), &inserted));
+		if (odd && inserted)
+			*odd = (u8)((m_tfx_test_order.count + 1) & 1);
+		if (odd && *odd)
+		{
+			pipeline = GetTFXSibling(p, true);
+			if (pipeline != VK_NULL_HANDLE)
+				goto sibling;
+		}
+	}
 	/* (=async: a key with no sibling yet has one built here, so every new
 	 * key draws with one while its own is built on the thread) */
 	else if (m_warm)
 	{
-		const auto it = PipelineWarmTake() ? m_tfx_pipelines.find(p) : m_tfx_pipelines.end();
-		if (it != m_tfx_pipelines.end())
-			return it->second;
+		const VkPipeline* found = PipelineWarmTake() ? vk_pipe_find(&m_tfx_pipelines, p) : nullptr;
+		if (found)
+			return *found;
 		if (m_test_pipelines != 1)
 		{
 			/* (linking one is cheap where libraries are: a new state
 			 * draws at once too) */
 			pipeline = GetTFXSibling(p, m_test_pipelines == 3
 				|| (m_optional_extensions.vk_ext_graphics_pipeline_library && !m_gpl_failed));
+			int inserted;
 			if (pipeline != VK_NULL_HANDLE
-				&& (m_tfx_pending.find(p) != m_tfx_pending.end() || (PipelineWarmQueue(p, 0)
-					&& m_tfx_pending.emplace(p, 1).second)))
+				&& (gs_flat_map_find(&m_tfx_pending, &p, sizeof(p), gs_key_hash(&p, sizeof(p))) || (PipelineWarmQueue(p, 0)
+					&& gs_flat_map_insert(&m_tfx_pending, &p, gs_key_hash(&p, sizeof(p)), &inserted))))
 				goto sibling;
 		}
 	}
 
 	pipeline = BuildTFXPipeline(p, &m_modules, m_pipeline_cache);
-	m_tfx_pipelines.emplace(p, pipeline);
+	{
+		int inserted;
+		VkPipeline* slot = vk_pipe_entry(&m_tfx_pipelines, p, &inserted);
+		if (!slot)
+		{
+			if (pipeline != VK_NULL_HANDLE)
+				vkDestroyPipeline(vk_init_info.device, pipeline, nullptr);
+			return VK_NULL_HANDLE;
+		}
+		*slot = pipeline;
+	}
 	if (pipeline != VK_NULL_HANDLE)
 	{
 		m_pipelines_built_here++;
@@ -4284,8 +4448,6 @@ void GSDeviceVK::PipelineCacheClose()
 #define PLIST_MAX     65536u
 /* flags: the selectors leave out the depth/stencil state (dss is zero) */
 #define PLIST_FLAG_DYNAMIC_DS 1u
-/* flags: and the blend state (bs and cms are zero) */
-#define PLIST_FLAG_DYNAMIC_BLEND 2u
 
 typedef struct PipelineListHeader
 {
@@ -4305,10 +4467,10 @@ static void PipelineListPath(char* path, size_t size)
 /* A selector a list may hold: a key (TFXPipelineKey), whose fields index
  * tables of the size they have here, and with the depth/stencil state
  * dynamic it has none. */
-static bool PipelineSelectorValid(const GSDeviceVK::PipelineSelector& p, bool dynamic_ds, bool dynamic_blend)
+static bool PipelineSelectorValid(const GSDeviceVK::PipelineSelector& p, bool dynamic_ds)
 {
 	return p.topology < 3 && (!p.bs.enable || p.bs.op < 3) && (!dynamic_ds || p.dss.key == 0)
-		&& TFXPipelineKey(p, dynamic_blend) == p;
+		&& TFXPipelineKey(p) == p;
 }
 
 void GSDeviceVK::PipelineListAdd(const PipelineSelector& p)
@@ -4344,7 +4506,6 @@ void GSDeviceVK::PipelineListLoad()
 	u64 hash;
 	u32 i;
 	const bool dynamic_ds = m_optional_extensions.vk_ext_extended_dynamic_state;
-	const bool dynamic_blend = m_optional_extensions.vk_ext_extended_dynamic_state3;
 
 	m_plist_count = 0;
 	m_plist_dirty = false;
@@ -4358,7 +4519,7 @@ void GSDeviceVK::PipelineListLoad()
 	memcpy(&h, data, sizeof(h));
 	if (h.magic != PLIST_MAGIC || h.version != PLIST_VERSION || h.shader_version != VKSPV_VERSION
 		|| h.entry_size != sizeof(PipelineSelector) || h.count > PLIST_MAX
-		|| h.flags != ((dynamic_ds ? PLIST_FLAG_DYNAMIC_DS : 0u) | (dynamic_blend ? PLIST_FLAG_DYNAMIC_BLEND : 0u))
+		|| h.flags != (dynamic_ds ? PLIST_FLAG_DYNAMIC_DS : 0u)
 		|| (int64_t)(sizeof(h) + (u64)h.count * sizeof(PipelineSelector) + sizeof(hash)) != len)
 		goto refuse;
 	memcpy(&hash, (const u8*)data + len - sizeof(hash), sizeof(hash));
@@ -4376,7 +4537,7 @@ void GSDeviceVK::PipelineListLoad()
 	{
 		PipelineSelector p;
 		memcpy(&p, (const u8*)data + sizeof(h) + i * sizeof(p), sizeof(p));
-		if (!PipelineSelectorValid(p, dynamic_ds, dynamic_blend))
+		if (!PipelineSelectorValid(p, dynamic_ds))
 			goto refuse;
 		memcpy(&m_plist[i], &p, sizeof(p));
 	}
@@ -4407,8 +4568,7 @@ void GSDeviceVK::PipelineListSave()
 	h.shader_version = VKSPV_VERSION;
 	h.entry_size     = sizeof(PipelineSelector);
 	h.count          = m_plist_count;
-	h.flags          = (m_optional_extensions.vk_ext_extended_dynamic_state ? PLIST_FLAG_DYNAMIC_DS : 0u)
-		| (m_optional_extensions.vk_ext_extended_dynamic_state3 ? PLIST_FLAG_DYNAMIC_BLEND : 0u);
+	h.flags          = m_optional_extensions.vk_ext_extended_dynamic_state ? PLIST_FLAG_DYNAMIC_DS : 0u;
 	size = sizeof(h) + (size_t)m_plist_count * sizeof(PipelineSelector) + sizeof(hash);
 	if (!(buf = (u8*)malloc(size)))
 		return;
@@ -4709,26 +4869,33 @@ bool GSDeviceVK::PipelineWarmTake()
 		}
 		else if (res.dynamic == 2)
 		{
-			VkPipeline& lib = m_tfx_fs_libs[res.sel];
-			if (lib == VK_NULL_HANDLE)
-				lib = res.pipeline;
+			int inserted;
+			VkPipeline* lib = vk_pipe_entry(&m_tfx_fs_libs, res.sel, &inserted);
+			if (lib && *lib == VK_NULL_HANDLE)
+				*lib = res.pipeline;
 			else if (res.pipeline != VK_NULL_HANDLE)
 				vkDestroyPipeline(vk_init_info.device, res.pipeline, nullptr);
 		}
 		else if (res.dynamic)
 		{
-			VkPipeline& sibling = m_tfx_siblings[res.sel];
-			if (sibling == VK_NULL_HANDLE)
-				sibling = res.pipeline;
+			int inserted;
+			VkPipeline* sibling = vk_pipe_entry(&m_tfx_siblings, res.sel, &inserted);
+			if (sibling && *sibling == VK_NULL_HANDLE)
+				*sibling = res.pipeline;
 			else if (res.pipeline != VK_NULL_HANDLE)
 				vkDestroyPipeline(vk_init_info.device, res.pipeline, nullptr);
 		}
 		else
 		{
+			int inserted = 0;
+			VkPipeline* slot;
 			if (res.job)
-				m_tfx_pending.erase(res.sel);
+				gs_flat_map_erase(&m_tfx_pending, &res.sel, gs_key_hash(&res.sel, sizeof(res.sel)));
 			/* (a key built here meanwhile keeps that one) */
-			if (!m_tfx_pipelines.emplace(res.sel, res.pipeline).second)
+			slot = vk_pipe_entry(&m_tfx_pipelines, res.sel, &inserted);
+			if (slot && inserted)
+				*slot = res.pipeline;
+			if (!inserted)
 			{
 				if (res.pipeline != VK_NULL_HANDLE)
 					vkDestroyPipeline(vk_init_info.device, res.pipeline, nullptr);
@@ -4780,7 +4947,7 @@ void GSDeviceVK::PipelineWarmStop()
 	free(w);
 	m_warm           = nullptr;
 	m_jobs_in_flight = 0;
-	m_tfx_pending.clear();
+	gs_flat_map_clear(&m_tfx_pending);
 }
 
 #else
@@ -4799,9 +4966,6 @@ bool GSDeviceVK::BindDrawPipeline(const PipelineSelector& p)
 		return false;
 
 	SetPipeline(pipeline);
-	/* (without dynamic blend it matches what applied holds: never set) */
-	if (m_optional_extensions.vk_ext_extended_dynamic_state3)
-		m_blend_key = TFXBlendWord(p);
 
 	return ApplyTFXState();
 }
@@ -4812,9 +4976,9 @@ void GSDeviceVK::InitializeState()
 	m_current_render_pass = VK_NULL_HANDLE;
 
 	for (u32 i = 0; i < NUM_TFX_TEXTURES; i++)
-		m_tfx_textures[i] = m_null_texture.get();
+		m_tfx_textures[i] = m_null_texture;
 
-	m_utility_texture = m_null_texture.get();
+	m_utility_texture = m_null_texture;
 
 	m_point_sampler   = GetSampler(GSHWDrawConfig::SamplerSelector::Point());
 	m_linear_sampler  = GetSampler(GSHWDrawConfig::SamplerSelector::Linear());
@@ -4889,8 +5053,8 @@ void GSDeviceVK::InvalidateCachedState()
 	m_dirty_flags |= ALL_DIRTY_STATE;
 
 	for (u32 i = 0; i < NUM_TFX_TEXTURES; i++)
-		m_tfx_textures[i] = m_null_texture.get();
-	m_utility_texture = m_null_texture.get();
+		m_tfx_textures[i] = m_null_texture;
+	m_utility_texture = m_null_texture;
 	m_current_framebuffer = VK_NULL_HANDLE;
 	m_current_render_target = nullptr;
 	m_current_depth_target = nullptr;
@@ -4955,33 +5119,6 @@ __noinline void GSDeviceVK::ApplyDepthStencilState(VkCommandBuffer cmdbuf)
 	m_dss_applied = m_dss_key;
 }
 
-/* Sets what differs between the blend the command buffer holds and the
- * one the draw wants (TFXBlendWord), with VK_EXT_extended_dynamic_state3:
- * all of it when nothing is known. */
-__noinline void GSDeviceVK::ApplyBlendState(VkCommandBuffer cmdbuf)
-{
-	const u32 want = m_blend_key, have = m_blend_applied;
-	const bool all = (have == ~0u);
-	if (all || ((want ^ have) & 1u))
-	{
-		const VkBool32 enable = want & 1u;
-		vkCmdSetColorBlendEnableEXT(cmdbuf, 0, 1, &enable);
-	}
-	if (all || ((want ^ have) & 0x7FFFEu))
-	{
-		const VkColorBlendEquationEXT eq = {vk_blend_factors[(want >> 1) & 15u], vk_blend_factors[(want >> 5) & 15u],
-			vk_blend_ops[(want >> 9) & 3u], vk_blend_factors[(want >> 11) & 15u], vk_blend_factors[(want >> 15) & 15u],
-			VK_BLEND_OP_ADD};
-		vkCmdSetColorBlendEquationEXT(cmdbuf, 0, 1, &eq);
-	}
-	if (all || ((want ^ have) & (15u << 19)))
-	{
-		const VkColorComponentFlags mask = (want >> 19) & 15u;
-		vkCmdSetColorWriteMaskEXT(cmdbuf, 0, 1, &mask);
-	}
-	m_blend_applied = want;
-}
-
 void GSDeviceVK::PSSetShaderResource(int i, GSTexture* sr, bool check_state)
 {
 	GSTextureVK* vkTex = static_cast<GSTextureVK*>(sr);
@@ -4998,7 +5135,7 @@ void GSDeviceVK::PSSetShaderResource(int i, GSTexture* sr, bool check_state)
 		vkTex->m_use_fence_counter = GetCurrentFenceCounter();
 	}
 	else
-		vkTex = m_null_texture.get();
+		vkTex = m_null_texture;
 
 	if (m_tfx_textures[i] == vkTex)
 		return;
@@ -5028,7 +5165,7 @@ void GSDeviceVK::SetUtilityTexture(GSTexture* tex, VkSampler sampler)
 		vkTex->m_use_fence_counter = GetCurrentFenceCounter();
 	}
 	else
-		vkTex = m_null_texture.get();
+		vkTex = m_null_texture;
 
 	if (m_utility_texture == vkTex && m_utility_sampler == sampler)
 		return;
@@ -5050,13 +5187,13 @@ void GSDeviceVK::UnbindTexture(GSTextureVK* tex)
 	{
 		if (m_tfx_textures[i] == tex)
 		{
-			m_tfx_textures[i] = m_null_texture.get();
+			m_tfx_textures[i] = m_null_texture;
 			m_dirty_flags |= (i < 2) ? DIRTY_FLAG_TFX_SAMPLERS_DS : DIRTY_FLAG_TFX_RT_TEXTURE_DS;
 		}
 	}
 	if (m_utility_texture == tex)
 	{
-		m_utility_texture = m_null_texture.get();
+		m_utility_texture = m_null_texture;
 		m_dirty_flags |= DIRTY_FLAG_UTILITY_TEXTURE;
 	}
 	if (m_current_render_target == tex || m_current_depth_target == tex)
@@ -5127,7 +5264,7 @@ void GSDeviceVK::EndRenderPass()
 
 void GSDeviceVK::SetViewport(const VkViewport& viewport)
 {
-	if (std::memcmp(&viewport, &m_viewport, sizeof(VkViewport)) == 0)
+	if (memcmp(&viewport, &m_viewport, sizeof(VkViewport)) == 0)
 		return;
 
 	memcpy(&m_viewport, &viewport, sizeof(VkViewport));
@@ -5201,8 +5338,7 @@ __noinline bool GSDeviceVK::RetryTFXState(bool already_execed, const char* what)
 
 bool GSDeviceVK::ApplyTFXState(bool already_execed)
 {
-	if (m_current_pipeline_layout == PipelineLayout::TFX && m_dirty_flags == 0 && m_dss_key == m_dss_applied
-		&& m_blend_key == m_blend_applied)
+	if (m_current_pipeline_layout == PipelineLayout::TFX && m_dirty_flags == 0 && m_dss_key == m_dss_applied)
 		return true;
 
 	const VkCommandBuffer cmdbuf = GetCurrentCommandBuffer();
@@ -5246,14 +5382,25 @@ bool GSDeviceVK::ApplyTFXState(bool already_execed)
 
 	if ((flags & DIRTY_FLAG_TFX_SAMPLERS_DS) || m_tfx_texture_descriptor_set == VK_NULL_HANDLE)
 	{
-		m_tfx_texture_descriptor_set = AllocateDescriptorSet(m_tfx_sampler_ds_layout);
+		FrameResources::DescriptorSetKey key;
+		key.view0 = (u64)m_tfx_textures[0]->GetView();
+		key.view1 = (u64)m_tfx_textures[1]->GetView();
+		key.sampler = (u64)m_tfx_sampler;
+		key.layout0 = (u32)m_tfx_textures[0]->GetVkLayout();
+		key.layout1 = (u32)m_tfx_textures[1]->GetVkLayout();
+		m_tfx_texture_descriptor_set = FindCachedDescriptorSet(&key);
 		if (m_tfx_texture_descriptor_set == VK_NULL_HANDLE)
-			return RetryTFXState(already_execed, "allocate TFX texture descriptors");
+		{
+			m_tfx_texture_descriptor_set = AllocateDescriptorSet(m_tfx_sampler_ds_layout);
+			if (m_tfx_texture_descriptor_set == VK_NULL_HANDLE)
+				return RetryTFXState(already_execed, "allocate TFX texture descriptors");
 
-		dsub.AddCombinedImageSamplerDescriptorWrite(
-			m_tfx_texture_descriptor_set, 0, m_tfx_textures[0]->GetView(), m_tfx_sampler, m_tfx_textures[0]->GetVkLayout());
-		dsub.AddImageDescriptorWrite(m_tfx_texture_descriptor_set, 1, m_tfx_textures[1]->GetView(), m_tfx_textures[1]->GetVkLayout());
-		dsub.Update(vk_init_info.device);
+			dsub.AddCombinedImageSamplerDescriptorWrite(
+				m_tfx_texture_descriptor_set, 0, m_tfx_textures[0]->GetView(), m_tfx_sampler, m_tfx_textures[0]->GetVkLayout());
+			dsub.AddImageDescriptorWrite(m_tfx_texture_descriptor_set, 1, m_tfx_textures[1]->GetView(), m_tfx_textures[1]->GetVkLayout());
+			dsub.Update(vk_init_info.device);
+			CacheDescriptorSet(&key, m_tfx_texture_descriptor_set);
+		}
 
 		if (!layout_changed)
 		{
@@ -5265,23 +5412,35 @@ bool GSDeviceVK::ApplyTFXState(bool already_execed)
 
 	if ((flags & DIRTY_FLAG_TFX_RT_TEXTURE_DS) || m_tfx_rt_descriptor_set == VK_NULL_HANDLE)
 	{
-		m_tfx_rt_descriptor_set = AllocateDescriptorSet(m_tfx_rt_texture_ds_layout);
+		/* (no sampler: 1 keeps this key apart from a texture set's) */
+		FrameResources::DescriptorSetKey key;
+		key.view0 = (u64)m_tfx_textures[NUM_TFX_DRAW_TEXTURES]->GetView();
+		key.view1 = (u64)m_tfx_textures[NUM_TFX_DRAW_TEXTURES + 1]->GetView();
+		key.sampler = 1;
+		key.layout0 = m_features.texture_barrier ? (u32)VK_IMAGE_LAYOUT_GENERAL : (u32)m_tfx_textures[NUM_TFX_DRAW_TEXTURES]->GetVkLayout();
+		key.layout1 = (u32)m_tfx_textures[NUM_TFX_DRAW_TEXTURES + 1]->GetVkLayout();
+		m_tfx_rt_descriptor_set = FindCachedDescriptorSet(&key);
 		if (m_tfx_rt_descriptor_set == VK_NULL_HANDLE)
-			return RetryTFXState(already_execed, "allocate TFX sampler descriptors");
+		{
+			m_tfx_rt_descriptor_set = AllocateDescriptorSet(m_tfx_rt_texture_ds_layout);
+			if (m_tfx_rt_descriptor_set == VK_NULL_HANDLE)
+				return RetryTFXState(already_execed, "allocate TFX sampler descriptors");
 
-		if (m_features.texture_barrier)
-		{
-			dsub.AddInputAttachmentDescriptorWrite(
-				m_tfx_rt_descriptor_set, 0, m_tfx_textures[NUM_TFX_DRAW_TEXTURES]->GetView(), VK_IMAGE_LAYOUT_GENERAL);
+			if (m_features.texture_barrier)
+			{
+				dsub.AddInputAttachmentDescriptorWrite(
+					m_tfx_rt_descriptor_set, 0, m_tfx_textures[NUM_TFX_DRAW_TEXTURES]->GetView(), VK_IMAGE_LAYOUT_GENERAL);
+			}
+			else
+			{
+				dsub.AddImageDescriptorWrite(m_tfx_rt_descriptor_set, 0, m_tfx_textures[NUM_TFX_DRAW_TEXTURES]->GetView(),
+					m_tfx_textures[NUM_TFX_DRAW_TEXTURES]->GetVkLayout());
+			}
+			dsub.AddImageDescriptorWrite(m_tfx_rt_descriptor_set, 1, m_tfx_textures[NUM_TFX_DRAW_TEXTURES + 1]->GetView(),
+				m_tfx_textures[NUM_TFX_DRAW_TEXTURES + 1]->GetVkLayout());
+			dsub.Update(vk_init_info.device);
+			CacheDescriptorSet(&key, m_tfx_rt_descriptor_set);
 		}
-		else
-		{
-			dsub.AddImageDescriptorWrite(m_tfx_rt_descriptor_set, 0, m_tfx_textures[NUM_TFX_DRAW_TEXTURES]->GetView(),
-				m_tfx_textures[NUM_TFX_DRAW_TEXTURES]->GetVkLayout());
-		}
-		dsub.AddImageDescriptorWrite(m_tfx_rt_descriptor_set, 1, m_tfx_textures[NUM_TFX_DRAW_TEXTURES + 1]->GetView(),
-			m_tfx_textures[NUM_TFX_DRAW_TEXTURES + 1]->GetVkLayout());
-		dsub.Update(vk_init_info.device);
 
 		if (!layout_changed)
 		{
@@ -5296,20 +5455,25 @@ bool GSDeviceVK::ApplyTFXState(bool already_execed)
 	}
 
 	/* A sibling's key: pushed when it changes, and again in a new command
-	 * buffer or after a utility pipeline's push constants. */
-	if (m_tfx_dynamic && (layout_changed || (flags & DIRTY_FLAG_TFX_KEY)
-			|| memcmp(m_tfx_key, m_tfx_key_pushed, sizeof(m_tfx_key))))
+	 * buffer or after a utility pipeline's push constants. A draw of a
+	 * pipeline of its own pushes none, so what those asked for is kept
+	 * for the next sibling's: else a sibling drawn after one, with the
+	 * key it pushed before them, read what they left (a palette's
+	 * conversion's constants, say: Ridge Racer V's backgrounds). */
+	if (layout_changed || (flags & DIRTY_FLAG_TFX_KEY))
+		m_tfx_key_stale = true;
+	if (m_tfx_dynamic && (m_tfx_key_stale || memcmp(m_tfx_key, m_tfx_key_pushed, sizeof(m_tfx_key))))
 	{
 		vkCmdPushConstants(cmdbuf, m_tfx_pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(m_tfx_key), m_tfx_key);
 		memcpy(m_tfx_key_pushed, m_tfx_key, sizeof(m_tfx_key));
+		m_tfx_key_stale = false;
 	}
 
 	if (layout_changed)
 	{
 		m_current_pipeline_layout = PipelineLayout::TFX;
 		/* a new command buffer, or a utility pipeline's own state */
-		m_dss_applied   = m_dss_dynamic;
-		m_blend_applied = m_blend_dynamic;
+		m_dss_applied = m_dss_dynamic;
 
 		dsets[0] = m_tfx_ubo_descriptor_set;
 		dsets[1] = m_tfx_texture_descriptor_set;
@@ -5317,7 +5481,7 @@ bool GSDeviceVK::ApplyTFXState(bool already_execed)
 
 		vkCmdBindDescriptorSets(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, m_tfx_pipeline_layout, 0,
 			NUM_TFX_DESCRIPTOR_SETS, dsets, NUM_TFX_DYNAMIC_OFFSETS,
-			m_tfx_dynamic_offsets.data());
+			m_tfx_dynamic_offsets);
 	}
 	else if (num_dsets > 0)
 	{
@@ -5326,7 +5490,7 @@ bool GSDeviceVK::ApplyTFXState(bool already_execed)
 		if (start_dset == TFX_DESCRIPTOR_SET_UBO)
 		{
 			dynamic_count   = NUM_TFX_DYNAMIC_OFFSETS;
-			dynamic_offsets = m_tfx_dynamic_offsets.data();
+			dynamic_offsets = m_tfx_dynamic_offsets;
 		}
 		else
 		{
@@ -5341,8 +5505,6 @@ bool GSDeviceVK::ApplyTFXState(bool already_execed)
 
 	if (m_dss_key != m_dss_applied)
 		ApplyDepthStencilState(cmdbuf);
-	if (m_blend_key != m_blend_applied)
-		ApplyBlendState(cmdbuf);
 
 	ApplyBaseState(flags, cmdbuf);
 	return true;
@@ -5489,7 +5651,7 @@ GSTextureVK* GSDeviceVK::SetupPrimitiveTrackingDATE(GSHWDrawConfig& config)
 	UploadHWDrawVerticesAndIndices(config);
 
 	// primid texture will get re-bound, so clear it since we're using push descriptors
-	PSSetShaderResource(3, m_null_texture.get(), false);
+	PSSetShaderResource(3, m_null_texture, false);
 
 	// cut down the configuration for the prepass, we don't need blending or any feedback loop
 	PipelineSelector& pipe = m_pipeline_selector;
@@ -5972,14 +6134,14 @@ void GSDeviceVK::SendHWDraw(const GSHWDrawConfig& config, GSTextureVK* draw_rt, 
 	if (config.drawlist)
 	{
 		const u32 indices_per_prim = config.indices_per_prim;
-		const u32 draw_list_size = static_cast<u32>(config.drawlist->size());
+		const u32 draw_list_size = config.drawlist_count;
 		const VkImageMemoryBarrier barrier = GetColorBufferBarrier(draw_rt);
 		u32 p = 0;
 		u32 n = 0;
 
 		if (skip_first_barrier)
 		{
-			const u32 count = (*config.drawlist)[n] * indices_per_prim;
+			const u32 count = config.drawlist[n] * indices_per_prim;
 			DrawIndexedPrimitive(p, count);
 			p += count;
 			++n;
@@ -5991,7 +6153,7 @@ void GSDeviceVK::SendHWDraw(const GSHWDrawConfig& config, GSTextureVK* draw_rt, 
 				VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_DEPENDENCY_BY_REGION_BIT, 0,
 				nullptr, 0, nullptr, 1, &barrier);
 
-			const u32 count = (*config.drawlist)[n] * indices_per_prim;
+			const u32 count = config.drawlist[n] * indices_per_prim;
 			DrawIndexedPrimitive(p, count);
 			p += count;
 		}

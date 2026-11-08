@@ -104,6 +104,241 @@ for renderer in Vulkan paraLLEl-GS; do
 	fi
 done
 
+# A local to host transfer read in two parts with a packet between: the
+# first part holds the top rows, the second the bottom ones, on both
+# renderers. readback_t4hh above reads each transfer whole.
+"$SCRATCH/swdraw" --bios "$SCRATCH/readback_parts.bin" readback_parts
+for renderer in Vulkan paraLLEl-GS; do
+	if ! VN_EXPECT_RUN=00112233,00445566 VN_IDLE_BIOS=1 LRPS2_BIOS="$SCRATCH/readback_parts.bin" VN_RENDERER=$renderer \
+			timeout 300 "$DIR/vknegotiate" "$CORE" "$SCRATCH" v2; then
+		rm -rf "$SCRATCH"
+		echo "  FAIL: readback in two parts, $renderer"
+		exit 1
+	fi
+done
+
+# A buffer one page column wide drawn at its two columns in turn over the
+# pages of a depth buffer of another width, a 24-bit Z laying each next
+# column down, twice: the second row of pages read back holds what the
+# GS leaves there, on both renderers.
+"$SCRATCH/swdraw" --bios "$SCRATCH/column_passes.bin" column_passes
+for renderer in Vulkan paraLLEl-GS; do
+	if ! VN_EXPECT_RUN=00181818,00505050,00404040 VN_IDLE_BIOS=1 LRPS2_BIOS="$SCRATCH/column_passes.bin" VN_RENDERER=$renderer \
+			timeout 300 "$DIR/vknegotiate" "$CORE" "$SCRATCH" v2; then
+		rm -rf "$SCRATCH"
+		echo "  FAIL: column passes, $renderer"
+		exit 1
+	fi
+done
+
+# A buffer's alpha laid down once, then every frame a 24-bit depth
+# buffer and a colour draw with its alpha masked written over its pages
+# (the colour draw as wide as the buffer, wider, or one page wide at the
+# depth buffer's own base), and the alpha read as PSMT8H through a
+# palette: what was laid down, on both renderers, and still after a state
+# saved by one is loaded.
+for c in alpha_under_depth alpha_under_depth_wide alpha_under_depth_strip; do
+	"$SCRATCH/swdraw" --bios "$SCRATCH/$c.bin" $c
+	for renderer in Vulkan paraLLEl-GS; do
+		if ! VN_EXPECT_RUN=40404040,c0c0c0c0,58585858,d8d8d8d8 VN_IDLE_BIOS=1 LRPS2_BIOS="$SCRATCH/$c.bin" VN_RENDERER=$renderer \
+				timeout 300 "$DIR/vknegotiate" "$CORE" "$SCRATCH" v2; then
+			rm -rf "$SCRATCH"
+			echo "  FAIL: $c, $renderer"
+			exit 1
+		fi
+	done
+done
+
+# The same with the alpha uploaded and read as a texture too large for
+# the hash cache (alpha_under_depth_big), the effect one page wide at the
+# depth buffer's base: the colour draw's mask keeps the byte the texture
+# lives in, so GSdx keeps the texture's pages rather than loading the one
+# the draw touched again every frame. The Vulkan renderer's uploads a
+# steady frame make are counted: the buffer's RGB the depth draw dirtied,
+# loaded before the effect, is the one; the texture adds none.
+c=alpha_under_depth_big
+"$SCRATCH/swdraw" --bios "$SCRATCH/$c.bin" $c
+for renderer in Vulkan paraLLEl-GS; do
+	if ! VN_EXPECT_RUN=40404040,c0c0c0c0,58585858,d8d8d8d8 VN_IDLE_BIOS=1 LRPS2_BIOS="$SCRATCH/$c.bin" VN_RENDERER=$renderer \
+			timeout 300 "$DIR/vknegotiate" "$CORE" "$SCRATCH" v2; then
+		rm -rf "$SCRATCH"
+		echo "  FAIL: $c, $renderer"
+		exit 1
+	fi
+done
+VN_COUNT_CALLS=1 VN_FRAMES=40 VN_IDLE_BIOS=1 LRPS2_BIOS="$SCRATCH/$c.bin" VN_RENDERER=Vulkan \
+	timeout 300 "$DIR/vknegotiate" "$CORE" "$SCRATCH" v2 > "$SCRATCH/$c.log" 2>&1 || true
+uploads=$(sed -n 's/.*run 40: calls.* b2i=\([0-9]*\).*/\1/p' "$SCRATCH/$c.log")
+if ! grep -q 'run 40: calls' "$SCRATCH/$c.log" || [ "${uploads:-0}" -gt 1 ]; then
+	rm -rf "$SCRATCH"
+	echo "  FAIL: $c: a steady frame on Vulkan uploads ${uploads:-nothing counted} textures, the dirtied RGB alone expected"
+	exit 1
+fi
+echo "  alpha under a masked colour draw: its texture stays loaded (${uploads:-0} upload a frame)"
+
+# A buffer's alpha laid down once, then every frame a constant 24-bit Z
+# written over one of its pages through a depth buffer of another width,
+# and the buffer's pages taken by colour draws of other widths, with their
+# alpha masked, before the alpha is read as PSMT8H through a palette: what
+# was laid down, on both renderers, and still after a state saved by one
+# is loaded. The Z leaves the page's alpha to the buffer as it leaves.
+c=alpha_dirtied_parked
+"$SCRATCH/swdraw" --bios "$SCRATCH/$c.bin" $c
+for renderer in Vulkan paraLLEl-GS; do
+	if ! VN_EXPECT_RUN=40404040,c0c0c0c0,58585858,d8d8d8d8 VN_IDLE_BIOS=1 LRPS2_BIOS="$SCRATCH/$c.bin" VN_RENDERER=$renderer \
+			timeout 300 "$DIR/vknegotiate" "$CORE" "$SCRATCH" v2; then
+		rm -rf "$SCRATCH"
+		echo "  FAIL: $c, $renderer"
+		exit 1
+	fi
+done
+
+# A depth buffer ten pages wide, drawn every frame, whose pages a colour
+# draw two pages wide then takes with its alpha masked, before they are
+# read as a texture at that width (depth_narrowed): the same picture on
+# every renderer, and on the Vulkan renderer no image copy a frame. GSdx
+# lays the depth's pages out at the draw's width as it converts them, a
+# draw a run of pages, rather than converting the whole buffer and
+# copying the pages over after.
+c=depth_narrowed
+"$SCRATCH/swdraw" --bios "$SCRATCH/$c.bin" $c
+narrowed() { VN_HASH_RGB=1 VN_HASH_IMAGE=1 VN_COUNT_CALLS=1 VN_FRAMES=40 VN_EXPECT_RUN=00102030,00405060,00123456 VN_IDLE_BIOS=1 LRPS2_BIOS="$SCRATCH/$c.bin" VN_RENDERER="$1" \
+	timeout 300 "$DIR/vknegotiate" "$CORE" "$SCRATCH" v2 > "$SCRATCH/$c.$2.log" 2>&1 || true
+	grep -q "vknegotiate v2: ok" "$SCRATCH/$c.$2.log" && sed -n 's/.*image: .*, hash \([0-9a-f]*\).*/\1/p' "$SCRATCH/$c.$2.log" | sort -u | tr '\n' ' '; }
+vk=$(narrowed Vulkan vk); pgs=$(narrowed paraLLEl-GS pgs); sw=$(narrowed "Software (HW)" sw)
+copies=$(sed -n 's/.*run 40: calls.* copyimg=\([0-9]*\).*/\1/p' "$SCRATCH/$c.vk.log")
+draws=$(sed -n 's/.*run 40: calls.* draw=\([0-9]*\).*/\1/p' "$SCRATCH/$c.vk.log")
+if [ -z "$vk" ] || [ "$vk" != "$pgs" ] || [ "$vk" != "$sw" ] || [ -n "$copies" ] || [ -z "$draws" ] || [ "$draws" -lt 3 ]; then
+	rm -rf "$SCRATCH"
+	echo "  FAIL: $c: Vulkan ${vk:-none}(${copies:-0} copies, ${draws:-0} draws a frame), paraLLEl-GS ${pgs:-none}, software ${sw:-none}"
+	exit 1
+fi
+echo "  a depth buffer taken by a narrower colour draw: the same picture on every renderer, no image copy a frame"
+
+# A buffer drawn four pages wide and then five every frame, each draw
+# covering every one of its pages and keeping nothing of them, before it
+# is read as a texture (width_overwritten): the same picture on every
+# renderer, and on the Vulkan renderer no image copy a frame. GSdx moves
+# a target's pages to the other width's places when a draw comes at it;
+# a draw that overwrites every page leaves nothing to move.
+c=width_overwritten
+"$SCRATCH/swdraw" --bios "$SCRATCH/$c.bin" $c
+overwritten() { VN_HASH_RGB=1 VN_HASH_IMAGE=1 VN_COUNT_CALLS=1 VN_FRAMES=40 VN_EXPECT_RUN=80102030,80405060 VN_IDLE_BIOS=1 LRPS2_BIOS="$SCRATCH/$c.bin" VN_RENDERER="$1" \
+	timeout 300 "$DIR/vknegotiate" "$CORE" "$SCRATCH" v2 > "$SCRATCH/$c.$2.log" 2>&1 || true
+	grep -q "vknegotiate v2: ok" "$SCRATCH/$c.$2.log" && sed -n 's/.*image: .*, hash \([0-9a-f]*\).*/\1/p' "$SCRATCH/$c.$2.log" | sort -u | tr '\n' ' '; }
+vk=$(overwritten Vulkan vk); pgs=$(overwritten paraLLEl-GS pgs); sw=$(overwritten "Software (HW)" sw)
+copies=$(sed -n 's/.*run 40: calls.* copyimg=\([0-9]*\).*/\1/p' "$SCRATCH/$c.vk.log")
+draws=$(sed -n 's/.*run 40: calls.* draw=\([0-9]*\).*/\1/p' "$SCRATCH/$c.vk.log")
+if [ -z "$vk" ] || [ "$vk" != "$pgs" ] || [ "$vk" != "$sw" ] || [ -n "$copies" ] || [ -z "$draws" ] || [ "$draws" -lt 3 ]; then
+	rm -rf "$SCRATCH"
+	echo "  FAIL: $c: Vulkan ${vk:-none}(${copies:-0} copies, ${draws:-0} draws a frame), paraLLEl-GS ${pgs:-none}, software ${sw:-none}"
+	exit 1
+fi
+echo "  a buffer overwritten at two widths in turn: the same picture on every renderer, no image copy a frame"
+
+# A buffer blurred in place every frame, a column of 32 at a time, each
+# column a sprite reading the buffer linear a texel to the side of where
+# it draws (blur_in_place): the readback on every renderer, and on
+# paraLLEl-GS the columns in one render pass. paraLLEl-GS reads such a
+# blur's source as it was before the pass rather than ending the pass
+# at every column whose page the last one wrote.
+c=blur_in_place
+"$SCRATCH/swdraw" --bios "$SCRATCH/$c.bin" $c
+for renderer in Vulkan "Software (HW)"; do
+	if ! VN_EXPECT_RUN=ffffffff VN_IDLE_BIOS=1 LRPS2_BIOS="$SCRATCH/$c.bin" VN_RENDERER="$renderer" \
+			timeout 300 "$DIR/vknegotiate" "$CORE" "$SCRATCH" v2 > "$SCRATCH/$c.log" 2>&1; then
+		rm -rf "$SCRATCH"
+		echo "  FAIL: $c, $renderer"
+		exit 1
+	fi
+done
+VN_COUNT_CALLS=1 VN_FRAMES=40 VN_EXPECT_RUN=ffffffff VN_IDLE_BIOS=1 LRPS2_BIOS="$SCRATCH/$c.bin" VN_RENDERER=paraLLEl-GS \
+	timeout 300 "$DIR/vknegotiate" "$CORE" "$SCRATCH" v2 > "$SCRATCH/$c.log" 2>&1 || true
+passes=$(sed -n 's/.*run 40: calls.* dispatch_ind=\([0-9]*\).*/\1/p' "$SCRATCH/$c.log")
+if ! grep -q "vknegotiate v2: ok" "$SCRATCH/$c.log" || [ -z "$passes" ] || [ "$passes" -gt 2 ]; then
+	rm -rf "$SCRATCH"
+	echo "  FAIL: $c: a frame of ten blur columns on paraLLEl-GS is ${passes:-no} render passes"
+	exit 1
+fi
+echo "  a buffer blurred in place a column at a time: $passes render passes a frame on paraLLEl-GS"
+
+# A palette drawn into a buffer one page wide, whose page a wider buffer
+# drawn every frame takes without drawing over the palette: an indexed
+# read through the palette gets it, on both renderers, and still after a
+# state saved by one is loaded. The palette's page is carried into the
+# wider buffer, and a buffer made over a loaded state's memory starts
+# from that memory.
+c=palette_engulfed
+"$SCRATCH/swdraw" --bios "$SCRATCH/$c.bin" $c
+for renderer in Vulkan paraLLEl-GS; do
+	if ! VN_EXPECT_RUN=40404040,c0c0c0c0,58585858,d8d8d8d8 VN_IDLE_BIOS=1 LRPS2_BIOS="$SCRATCH/$c.bin" VN_RENDERER=$renderer \
+			timeout 300 "$DIR/vknegotiate" "$CORE" "$SCRATCH" v2; then
+		rm -rf "$SCRATCH"
+		echo "  FAIL: $c, $renderer"
+		exit 1
+	fi
+done
+
+# A texture based at a block inside a page of a buffer, read within that
+# page: the buffer's texels from that block's place, on both renderers.
+c=block_offset_read
+"$SCRATCH/swdraw" --bios "$SCRATCH/$c.bin" $c
+for renderer in Vulkan paraLLEl-GS; do
+	if ! VN_EXPECT_RUN=00112233,00445566 VN_IDLE_BIOS=1 LRPS2_BIOS="$SCRATCH/$c.bin" VN_RENDERER=$renderer \
+			timeout 300 "$DIR/vknegotiate" "$CORE" "$SCRATCH" v2; then
+		rm -rf "$SCRATCH"
+		echo "  FAIL: $c, $renderer"
+		exit 1
+	fi
+done
+
+# A page a wider buffer takes from a narrower one, read as a texture by
+# its alpha after the wider buffer's draws masked alpha: the narrower
+# buffer's alpha, on both renderers.
+c=engulfed_alpha
+"$SCRATCH/swdraw" --bios "$SCRATCH/$c.bin" $c
+for renderer in Vulkan paraLLEl-GS; do
+	if ! VN_EXPECT_RUN=80102030,2004080c VN_IDLE_BIOS=1 LRPS2_BIOS="$SCRATCH/$c.bin" VN_RENDERER=$renderer \
+			timeout 300 "$DIR/vknegotiate" "$CORE" "$SCRATCH" v2; then
+		rm -rf "$SCRATCH"
+		echo "  FAIL: $c, $renderer"
+		exit 1
+	fi
+done
+
+# A palette read through with the linear filter, uploaded or drawn by the
+# GPU into a buffer; a palette drawn as a shade across its words: each
+# entry its native pixel's value, on both renderers, native and at 4x.
+for c in palette_bilinear palette_bilinear_drawn palette_shaded; do
+	case $c in
+		palette_shaded) expect=800f0f0f,801e1e1e,802d2d2d,803c3c3c ;;
+		*)              expect=10101010,30303030,50505050,70707070 ;;
+	esac
+	"$SCRATCH/swdraw" --bios "$SCRATCH/$c.bin" $c
+	for scale in 1 4; do
+		for renderer in Vulkan paraLLEl-GS; do
+			if ! VN_SCALE=$scale VN_EXPECT_RUN=$expect VN_IDLE_BIOS=1 LRPS2_BIOS="$SCRATCH/$c.bin" VN_RENDERER=$renderer \
+					timeout 300 "$DIR/vknegotiate" "$CORE" "$SCRATCH" v2; then
+				rm -rf "$SCRATCH"
+				echo "  FAIL: $c, $renderer at ${scale}x"
+				exit 1
+			fi
+		done
+	done
+done
+
+# The engulfed palette again at 4x: its pages taken, and a savestate's
+# round trip, at scale.
+c=palette_engulfed
+for renderer in Vulkan paraLLEl-GS; do
+	if ! VN_SCALE=4 VN_EXPECT_RUN=40404040,c0c0c0c0,58585858,d8d8d8d8 VN_IDLE_BIOS=1 LRPS2_BIOS="$SCRATCH/$c.bin" VN_RENDERER=$renderer \
+			timeout 300 "$DIR/vknegotiate" "$CORE" "$SCRATCH" v2; then
+		rm -rf "$SCRATCH"
+		echo "  FAIL: $c, $renderer at 4x"
+		exit 1
+	fi
+done
+
 # Destination alpha a clear wrote and a draw wrote, read back and read by
 # a blend: the same alpha either way, on both renderers.
 "$SCRATCH/swdraw" --bios "$SCRATCH/dest_alpha.bin" dest_alpha
@@ -167,9 +402,10 @@ for renderer in Vulkan paraLLEl-GS; do
 done
 
 # An 8x8 upload in one IMAGE packet, which the renderer takes from the
-# packet as it lies, and the same in two packets: the block holds the
-# data either way, on both renderers.
-for c in upload_whole upload_split; do
+# packet as it lies, the same in two packets, and in two with a palette
+# load from the block between them, which has the first half written
+# before it: the block holds the data every way, on both renderers.
+for c in upload_whole upload_split upload_clut_between; do
 	"$SCRATCH/swdraw" --bios "$SCRATCH/$c.bin" $c
 	for renderer in Vulkan paraLLEl-GS; do
 		if ! VN_EXPECT_RUN=00123456 VN_IDLE_BIOS=1 LRPS2_BIOS="$SCRATCH/$c.bin" VN_RENDERER=$renderer \
@@ -272,6 +508,18 @@ if [ -z "$pgs" ] || [ "$pgs" != "$sw" ]; then
 fi
 echo "  palettes drawn and loaded at once: no render pass of their own, the software renderer's colours"
 
+# A frame's render passes bind their textures from one descriptor set a
+# pool, each pass a range of it: a steady frame allocates no set, where
+# a set a pass charged a driver that backs every set with its layout's
+# whole capacity a megabyte a pass.
+sets=$(calls "$SCRATCH/clut_lines.log" descsets); passes=$(calls "$SCRATCH/clut_lines.log" dispatch_ind)
+if [ -z "$passes" ] || [ "$passes" -lt 1 ] || [ -n "$sets" ]; then
+	rm -rf "$SCRATCH"
+	echo "  FAIL: a steady frame on paraLLEl-GS allocates ${sets:-no} descriptor sets for ${passes:-no} indirect dispatches"
+	exit 1
+fi
+echo "  a steady frame allocates no descriptor set"
+
 # The same with the lines' coordinates stepping at other rates
 # (clut_scales): each entry is the texel the line put there, so every
 # sprite is the software renderer's, and only the palette whose lines
@@ -321,6 +569,58 @@ for scale in 1 2; do
 	fi
 	echo "  software renderer output, ${scale}x: a display ending inside a block row shows what the other does"
 done
+
+# A mipmapped texture read at a constant LOD by Gouraud triangles
+# (mip_shaded): the software renderer's picture is the hardware
+# renderers', on one rasterizer and on four. Its setup once kept the
+# colour steps in the slot holding the level's clamp, and the texels it
+# fetched came from past the level.
+c=mip_shaded
+"$SCRATCH/swdraw" --bios "$SCRATCH/$c.bin" $c
+hash_of() { VN_HASH_RGB=1 VN_HASH_IMAGE=1 VN_FRAMES=60 VN_IDLE_BIOS=1 LRPS2_BIOS="$SCRATCH/$c.bin" VN_RENDERER="$1" VN_OPTIONS="$2" \
+	timeout 300 "$DIR/vknegotiate" "$CORE" "$SCRATCH" v2 2>/dev/null | sed -n 's/.*image: .*, hash \([0-9a-f]*\).*/\1/p'; }
+vk=$(hash_of Vulkan ""); pgs=$(hash_of paraLLEl-GS ""); sw1=$(hash_of "Software (HW)" "pcsx2_sw_renderer_threads=0"); sw4=$(hash_of "Software (HW)" "pcsx2_sw_renderer_threads=3")
+if [ -z "$vk" ] || [ "$vk" != "$pgs" ] || [ "$vk" != "$sw1" ] || [ "$vk" != "$sw4" ]; then
+	rm -rf "$SCRATCH"
+	echo "  FAIL: $c: Vulkan ${vk:-none}, paraLLEl-GS ${pgs:-none}, software on one rasterizer ${sw1:-none}, on four ${sw4:-none}"
+	exit 1
+fi
+echo "  a mipmapped texture under shaded triangles: the same picture on every renderer"
+
+# Sixteen sprites a frame reading two textures in turn (texture_alternate)
+# on the Vulkan renderer: the descriptor sets a frame allocates are the
+# bindings it has (the two textures, the target, the present), not one a
+# draw.
+c=texture_alternate
+"$SCRATCH/swdraw" --bios "$SCRATCH/$c.bin" $c
+VN_COUNT_CALLS=1 VN_FRAMES=40 VN_EXPECT_RUN=80102030,80405060 VN_IDLE_BIOS=1 LRPS2_BIOS="$SCRATCH/$c.bin" VN_RENDERER=Vulkan \
+	timeout 300 "$DIR/vknegotiate" "$CORE" "$SCRATCH" v2 > "$SCRATCH/$c.log" 2>&1 || true
+sets=$(calls "$SCRATCH/$c.log" descsets); draws=$(calls "$SCRATCH/$c.log" draw)
+if ! grep -q "vknegotiate v2: ok" "$SCRATCH/$c.log" || [ -z "$draws" ] || [ "$draws" -lt 16 ] || [ "${sets:-0}" -gt 8 ]; then
+	rm -rf "$SCRATCH"
+	echo "  FAIL: $c: a frame of ${draws:-no} draws over two textures allocates ${sets:-no} descriptor sets on Vulkan"
+	exit 1
+fi
+echo "  two textures drawn in turn: ${sets:-0} descriptor sets a frame for $draws draws"
+
+# A texture streamed every frame in uploads larger than a staging block
+# and read through a region clamp neither side of which is a power of
+# two (stream_clamped), on paraLLEl-GS: a steady frame makes no image and
+# no buffer. The texture's image comes back from the slab for the next
+# of its size, the upload's staging block from the pool for the next
+# upload that fits it, and the scratch buffer a frame's passes fill from
+# the ones set aside once the GPU is done with them.
+c=stream_clamped
+"$SCRATCH/swdraw" --bios "$SCRATCH/$c.bin" $c
+VN_COUNT_CALLS=1 VN_FRAMES=40 VN_EXPECT_RUN=80402010 VN_IDLE_BIOS=1 LRPS2_BIOS="$SCRATCH/$c.bin" VN_RENDERER=paraLLEl-GS \
+	timeout 300 "$DIR/vknegotiate" "$CORE" "$SCRATCH" v2 > "$SCRATCH/$c.log" 2>&1 || true
+images=$(calls "$SCRATCH/$c.log" mkimage); bufs=$(calls "$SCRATCH/$c.log" mkbuffer); passes=$(calls "$SCRATCH/$c.log" dispatch_ind)
+if ! grep -q "vknegotiate v2: ok" "$SCRATCH/$c.log" || [ -z "$passes" ] || [ -n "$images" ] || [ -n "$bufs" ]; then
+	rm -rf "$SCRATCH"
+	echo "  FAIL: $c: a steady frame on paraLLEl-GS makes ${images:-no} images and ${bufs:-no} buffers for ${passes:-no} render passes"
+	exit 1
+fi
+echo "  a texture streamed and read every frame: no image or buffer made a frame"
 
 # A texture streamed and drawn every frame (stream_ct32) on paraLLEl-GS:
 # once the pipelines it builds ahead are built - only those its draws
@@ -516,6 +816,43 @@ if [ "$(ceil_of 3000000)" != "1 0" ] || [ "$(ceil_of 1000000)" != "0 1" ]; then
 	exit 1
 fi
 echo "  memory ceilings: a third submits without waiting, all of it waits, the picture the same"
+
+# No heap allocation by the core once a game is running: cases that make
+# a texture or palette every frame, or rewind one, run 600 frames with
+# alloccount.c preloaded, which counts what the core allocates over
+# frames 120 to 600 (the Vulkan driver's own allocations are not
+# counted). Each new texture used to cost a hash cache node and a source
+# set node, and a stream buffer's fence list a deque chunk now and then.
+# A core built with an address sanitizer allocates every node itself,
+# so that the sanitizer sees it, and is not counted.
+if LC_ALL=C grep -q __asan_init "$CORE"; then
+	alloc_cases=""
+	echo "  steady state allocations: not counted, the core is built with ASan"
+else
+	alloc_cases="stream_t8 stream_ct32 clut_scales texture_rewind"
+fi
+${CC:-cc} -std=gnu99 -Wall -O2 -shared -fPIC -o "$SHIM/alloccount.so" "$DIR/alloccount.c" -ldl
+for c in $alloc_cases; do
+	"$SHIM/swdraw" --bios "$SHIM/$c.bin" $c >/dev/null
+	SCRATCH=$(mktemp -d)
+	if ! LD_PRELOAD="$SHIM/alloccount.so" VN_ALLOC_CORE="$CORE" VN_ALLOC_WINDOW=120,600 \
+			VN_IDLE_BIOS=1 LRPS2_BIOS="$SHIM/$c.bin" VN_FRAMES=600 \
+			timeout 300 "$DIR/vknegotiate" "$CORE" "$SCRATCH" v2 > "$SHIM/alloc_$c.log" 2>&1; then
+		cat "$SHIM/alloc_$c.log"
+		rm -rf "$SCRATCH" "$SHIM"
+		echo "  FAIL: $c with allocations counted"
+		exit 1
+	fi
+	rm -rf "$SCRATCH"
+	n=$(sed -n 's/^alloccount: \([0-9]*\) core allocations$/\1/p' "$SHIM/alloc_$c.log")
+	if [ "$n" != 0 ]; then
+		grep '^alloccount:' "$SHIM/alloc_$c.log"
+		rm -rf "$SHIM"
+		echo "  FAIL: $c: the core allocated ${n:-?} times over frames 120-600, not 0"
+		exit 1
+	fi
+done
+[ -z "$alloc_cases" ] || echo "  steady state: no core heap allocations over 480 frames of new textures and palettes"
 
 # A 4-bit texture read off a 32-bit render target (tests/swdraw's
 # t4_from_target): converted on the GPU, without the target going through

@@ -19,7 +19,9 @@
 #include "GLStreamBuffer.h"
 #include "GLProgram.h"
 #include "GLShaderCache.h"
-#include "common/HashCombine.h"
+#include "GS/Renderers/Common/GSString.h"
+#include "GS/Renderers/Common/GSKeyHash.h"
+#include "GS/Renderers/Common/GSFlatMap.h"
 #include "GS/Renderers/Common/GSDevice.h"
 #include "GSTextureOGL.h"
 #include "GLState.h"
@@ -150,20 +152,10 @@ public:
 		__fi bool operator!=(const ProgramSelector& p) const { return !BitEqual(*this, p); }
 	};
 
-	struct ProgramSelectorHash
-	{
-		__fi std::size_t operator()(const ProgramSelector& p) const noexcept
-		{
-			std::size_t h = 0;
-			HashCombine(h, p.vs.key, p.ps.key_hi, p.ps.key_lo);
-			return h;
-		}
-	};
-
 private:
 	static constexpr u8 NUM_TIMESTAMP_QUERIES = 5;
 
-	std::unique_ptr<GLContext> m_gl_context;
+	GLContext* m_gl_context = nullptr;
 
 	bool m_is_gles = false;
 	bool m_colclip_float = false;
@@ -173,17 +165,17 @@ private:
 	GLuint m_fbo_read = 0; // frame buffer container only for reading
 	GLuint m_fbo_write = 0;	// frame buffer container only for writing
 	
-	std::unique_ptr<GLStreamBuffer> m_texture_upload_buffer;
+	GLStreamBuffer* m_texture_upload_buffer = nullptr;
 	
-	std::unique_ptr<GLStreamBuffer> m_vertex_stream_buffer;
-	std::unique_ptr<GLStreamBuffer> m_index_stream_buffer;
+	GLStreamBuffer* m_vertex_stream_buffer = nullptr;
+	GLStreamBuffer* m_index_stream_buffer = nullptr;
 	GLuint m_expand_ibo = 0;
 	GLuint m_vao = 0;
 	GLuint m_expand_vao = 0;
 	GLenum m_draw_topology = 0;
 
-	std::unique_ptr<GLStreamBuffer> m_vertex_uniform_stream_buffer;
-	std::unique_ptr<GLStreamBuffer> m_fragment_uniform_stream_buffer;
+	GLStreamBuffer* m_vertex_uniform_stream_buffer = nullptr;
+	GLStreamBuffer* m_fragment_uniform_stream_buffer = nullptr;
 	GLint m_uniform_buffer_alignment = 0;
 
 	struct
@@ -198,7 +190,7 @@ private:
 
 	struct
 	{
-		std::string vs;
+		gs_str_t vs; // its source, the vertex shader of several passes
 		GLProgram ps[static_cast<int>(ShaderConvert::Count)]; // program object
 		GLuint ln = 0; // sampler object
 		GLuint pt = 0; // sampler object
@@ -220,7 +212,11 @@ private:
 
 	GLuint m_ps_ss[1 << 8];
 	GSDepthStencilOGL* m_om_dss[1 << 5] = {};
-	std::unordered_map<ProgramSelector, GLProgram, ProgramSelectorHash> m_programs;
+	/* The programs by selector, compared bit for bit, in a GSFlatMap
+	 * from the selector to the GLProgram*, which the device owns: a
+	 * lookup reads one slot. The program is allocated on its own so the
+	 * pointer the last draw keeps stays put when the map grows. */
+	gs_flat_map_t m_programs;
 	/* The draws of one frame come in runs that share a program; remember
 	 * the last selector so the map is not walked for every draw, as the
 	 * D3D12 and Vulkan pipelines do (d9c02aae9). */
@@ -262,7 +258,7 @@ public:
 	GLenum GLBlendFactor(u8 factor) const;
 	__fi u32 GetFBORead() const { return m_fbo_read; }
 	__fi u32 GetFBOWrite() const { return m_fbo_write; }
-	__fi GLStreamBuffer* GetTextureUploadBuffer() const { return m_texture_upload_buffer.get(); }
+	__fi GLStreamBuffer* GetTextureUploadBuffer() const { return m_texture_upload_buffer; }
 	void CommitClear(GSTexture* t, bool use_write_fbo);
 
 	RenderAPI GetRenderAPI() const;
@@ -280,7 +276,7 @@ public:
 	void DrawIndexedPrimitive();
 	void DrawIndexedPrimitive(int offset, int count);
 
-	GSDownloadTexturePtr CreateDownloadTexture(u32 width, u32 height, GSTexture::Format format);
+	GSDownloadTexture* CreateDownloadTexture(u32 width, u32 height, GSTexture::Format format);
 
 	GSTexture* InitPrimDateTexture(GSTexture* rt, const GSVector4i& area, SetDATM datm);
 
@@ -291,7 +287,7 @@ public:
 	void StretchRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect, bool red, bool green, bool blue, bool alpha, ShaderConvert shader = ShaderConvert::COPY);
 	void StretchRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect, const GLProgram& ps, bool alpha_blend, OMColorMaskSelector cms, bool linear = true);
 	void PresentRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect);
-	void UpdateCLUTTexture(GSTexture* sTex, float sScale, u32 offsetX, u32 offsetY, GSTexture* dTex, u32 dOffset, u32 dSize, u32 samples);
+	void UpdateCLUTTexture(GSTexture* sTex, float sScale, float sSample, u32 offsetX, u32 offsetY, GSTexture* dTex, u32 dOffset, u32 dSize);
 	void ConvertToIndexedTexture(GSTexture* sTex, float sScale, u32 offsetX, u32 offsetY, u32 SBW, u32 SPSM, GSTexture* dTex, u32 DBW, u32 DPSM);
 	void FilteredDownsampleTexture(GSTexture* sTex, GSTexture* dTex, u32 downsample_factor, const GSVector2i& clamp_min, const GSVector4 &dRect);
 	void MoveTexels(GSTexture* sTex, GSTexture* dTex, const GSVector4& dRect, const MoveTexelsConstants& cb);
@@ -326,13 +322,17 @@ public:
 	void SetScissor(const GSVector4i& scissor);
 
 	bool CreateTextureFX();
-	std::string GetShaderSource(const std::string_view& entry, GLenum type, const char *glsl_h_code,
-		const std::string_view& macro_sel = std::string_view());
-	std::string GetShaderSource(const std::string_view& entry, GLenum type, const std::string_view& glsl_h_code,
-		const std::string_view& macro_sel = std::string_view());
-	std::string GenGlslHeader(const std::string_view& entry, GLenum type, const std::string_view& macro);
-	std::string GetVSSource(VSSelector sel);
-	std::string GetPSSource(const PSSelector& sel);
+	/* A shader's source into out: the GLSL header for entry and type,
+	 * the macros, then the shader file's code. */
+	bool GetShaderSource(gs_str_t* out, const char* entry, GLenum type, const char* glsl_h_code, const char* macro = nullptr);
+	bool GenGlslHeader(gs_str_t* out, const char* entry, GLenum type, const char* macro);
+	bool GetVSSource(gs_str_t* out, VSSelector sel);
+	bool GetPSSource(gs_str_t* out, const PSSelector& sel);
+	/* prog from the sources vs and ps, through the program cache. */
+	bool GetProgram(GLProgram* prog, const gs_str_t* vs, const gs_str_t* ps);
+	/* The sources of the program being made, kept at the largest. */
+	gs_str_t m_src_vs;
+	gs_str_t m_src_ps;
 	GLuint CreateSampler(PSSamplerSelector sel);
 	GSDepthStencilOGL* CreateDepthStencil(OMDepthStencilSelector dssel);
 

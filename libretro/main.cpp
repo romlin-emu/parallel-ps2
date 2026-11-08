@@ -184,7 +184,6 @@ static u8 setting_blending_accuracy            = 0;
 static u8 setting_cpu_sprite_size              = 0;
 static u8 setting_cpu_sprite_level             = 0;
 static u8 setting_software_clut_render         = 0;
-static u8 setting_auto_flush                   = 0;
 static u8 setting_round_sprite                 = 0;
 static u8 setting_texture_inside_rt            = 0;
 static u8 setting_ee_cycle_skip                = 0;
@@ -213,7 +212,6 @@ static bool setting_dev9_hdd                   = false;
 static bool setting_dev9_eth                   = false;
 static u32  setting_dev9_hdd_sectors           = 40u * (1024 * 1024 * 1024 / 512);
 static bool setting_enable_hw_hacks            = false;
-static bool setting_auto_flush_software        = true;
 static int setting_sw_renderer_threads         = 2;
 static bool setting_disable_depth_conversion   = false;
 static bool setting_framebuffer_conversion     = false;
@@ -339,8 +337,6 @@ static bool update_option_visibility(void)
 		option_display.visible = setting_show_gsdx_sw_only_options;
 		option_display.key     = "pcsx2_sw_renderer_threads";
 		environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
-		option_display.key     = "pcsx2_auto_flush_software";
-		environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
 
 		updated                = true;
 	}
@@ -379,8 +375,6 @@ static bool update_option_visibility(void)
 		option_display.key     = "pcsx2_cpu_sprite_level";
 		environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
 		option_display.key     = "pcsx2_software_clut_render";
-		environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
-		option_display.key     = "pcsx2_auto_flush";
 		environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
 		option_display.key     = "pcsx2_texture_inside_rt";
 		environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
@@ -963,23 +957,6 @@ static void check_variables(bool first_run)
 				}
 			}
 
-			var.key = "pcsx2_auto_flush";
-			if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
-			{
-				u8 auto_flush_prev = setting_auto_flush;
-				if (!strcmp(var.value, "disabled"))
-					setting_auto_flush = (u8)GSHWAutoFlushLevel::Disabled;
-				else if (!strcmp(var.value, "Sprites Only"))
-					setting_auto_flush = (u8)GSHWAutoFlushLevel::SpritesOnly;
-				else if (!strcmp(var.value, "All Primitives"))
-					setting_auto_flush = (u8)GSHWAutoFlushLevel::Enabled;
-
-				if (first_run || setting_auto_flush != auto_flush_prev)
-				{
-					s_option_config.GS.UserHacks_AutoFlush = static_cast<decltype(s_option_config.GS.UserHacks_AutoFlush)>(setting_auto_flush);
-					updated = true;
-				}
-			}
 
 			var.key = "pcsx2_texture_inside_rt";
 			if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
@@ -1187,18 +1164,6 @@ static void check_variables(bool first_run)
 			}
 		}
 
-		var.key = "pcsx2_auto_flush_software";
-		if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
-		{
-			bool auto_flush_software_prev = setting_auto_flush_software;
-			setting_auto_flush_software = !strcmp(var.value, "enabled");
-
-			if (first_run || setting_auto_flush_software != auto_flush_software_prev)
-			{
-				s_option_config.GS.AutoFlushSW = setting_auto_flush_software;
-				updated = true;
-			}
-		}
 	}
 
 	if (setting_plugin_type == PLUGIN_GSDX_HW || setting_plugin_type == PLUGIN_GSDX_SW)
@@ -2390,24 +2355,25 @@ void retro_init(void)
 		const char* system_base = nullptr;
 		environ_cb(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &system_base);
 
-		FileSystem::FindResultsArray results;
+		FILESYSTEM_FIND_RESULTS results = {};
 		char bios_dir[PCSX2_PATH_MAX];
 
 		pcsx2_path_join(bios_dir, sizeof(bios_dir), system_base, "pcsx2/bios");
-		if (FileSystem::FindFiles(bios_dir, "*", FILESYSTEM_FIND_FILES, &results))
+		if (FileSystem_FindFiles(bios_dir, "*", FILESYSTEM_FIND_FILES, &results))
 		{
 			u32 version, region;
 			static constexpr u32 MIN_BIOS_SIZE = 4 * _1mb;
 			static constexpr u32 MAX_BIOS_SIZE = 8 * _1mb;
 			char description[BIOS_DESCRIPTION_MAX];
 			char zone[BIOS_ZONE_MAX];
-			for (const FILESYSTEM_FIND_DATA& fd : results)
+			for (size_t fi = 0; fi < results.count; fi++)
 			{
+				const FILESYSTEM_FIND_DATA& fd = results.items[fi];
 				if (fd.Size < MIN_BIOS_SIZE || fd.Size > MAX_BIOS_SIZE)
 					continue;
 
-				if (IsBIOS(fd.FileName.c_str(), &version, description, sizeof(description), &region, zone, sizeof(zone)))
-					bios_info.push_back({ std::string(path_basename(fd.FileName.c_str())), std::string(description) });
+				if (IsBIOS(fd.FileName, &version, description, sizeof(description), &region, zone, sizeof(zone)))
+					bios_info.push_back({ std::string(path_basename(fd.FileName)), std::string(description) });
 			}
 
 			/* Find the BIOS core option and fill its values/labels/default_values */
@@ -2427,6 +2393,7 @@ void retro_init(void)
 				}
 			}
 		}
+		FileSystem_FreeFindResults(&results);
 	}
 
    	libretro_set_core_options(environ_cb, &option_categories);
@@ -3098,7 +3065,7 @@ void retro_run(void)
 	audio_queue_upload(mtgs_presented_mark, batch_cb);
 }
 
-std::optional<WindowInfo> Host::AcquireRenderWindow(void)
+WindowInfo Host::AcquireRenderWindow(void)
 {
 	WindowInfo wi;
 	retro_system_av_info av_info;

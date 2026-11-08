@@ -56,15 +56,21 @@ GSRasterizer::GSRasterizer(GSDrawScanline* ds, int id, int threads)
 	m_edge.buff     = static_cast<GSVertexSW*>(memalign_alloc(VECTOR_ALIGNMENT, sizeof(GSVertexSW) * 4096));
 	m_edge.count    = 0;
 	int rows        = (4096 >> m_thread_height) + 16;
-	m_scanline      = (u8*)memalign_alloc(64, rows);
+	m_scanline_own  = (u8*)memalign_alloc(64, 2 * rows);
+	m_scanline_all  = m_scanline_own + rows;
+	m_scanline      = m_scanline_own;
+	m_threads_own   = threads;
 
 	for (int i = 0; i < rows; i++)
-		m_scanline[i] = (i % threads) == id ? 1 : 0;
+	{
+		m_scanline_own[i] = (i % threads) == id ? 1 : 0;
+		m_scanline_all[i] = 1;
+	}
 }
 
 GSRasterizer::~GSRasterizer()
 {
-	memalign_free(m_scanline);
+	memalign_free(m_scanline_own);
 	memalign_free(m_edge.buff);
 }
 
@@ -107,6 +113,15 @@ int GSRasterizer::FindMyNextScanline(int top) const
 	}
 
 	return top;
+}
+
+void GSRasterizer::DrawWhole(GSRasterizerData& data)
+{
+	m_scanline = m_scanline_all;
+	m_threads  = 1;
+	Draw(data);
+	m_scanline = m_scanline_own;
+	m_threads  = m_threads_own;
 }
 
 void GSRasterizer::Draw(GSRasterizerData& data)
@@ -1251,6 +1266,12 @@ bool GSSingleRasterizer::IsSynced() const
 
 GSRasterizerList::GSRasterizerList(int threads)
 {
+	m_r         = static_cast<GSRasterizer**>(calloc(static_cast<size_t>(threads), sizeof(GSRasterizer*)));
+	m_workers   = static_cast<GSWorker**>(calloc(static_cast<size_t>(threads), sizeof(GSWorker*)));
+	m_worker_ctx = static_cast<Worker*>(calloc(static_cast<size_t>(threads), sizeof(Worker)));
+	m_threads   = static_cast<u32>(threads);
+	if (!m_r || !m_workers || !m_worker_ctx)
+		abort();
 	m_thread_height = compute_best_thread_height(threads);
 
 	const int rows = (4096 >> m_thread_height) + 16;
@@ -1262,11 +1283,19 @@ GSRasterizerList::GSRasterizerList(int threads)
 
 GSRasterizerList::~GSRasterizerList()
 {
+	for (u32 i = m_threads; i-- > 0;)
+		delete m_workers[i];
+	for (u32 i = m_threads; i-- > 0;)
+		delete m_r[i];
+	free(m_workers);
+	free(m_r);
+	free(m_worker_ctx);
 	memalign_free(m_scanline);
 }
 
-void GSRasterizerList::OnWorkerStartup(int i, u64 affinity)
+void GSRasterizerList::OnWorkerStartup(void* context)
 {
+	const u64 affinity = static_cast<const Worker*>(context)->affinity;
 	/* The affinity mask is computed on the spawning thread at Create()
 	 * and captured by value: reading EmuConfig (AffinityControlMode,
 	 * THREAD_VU1) from inside the freshly started worker raced
@@ -1279,8 +1308,9 @@ void GSRasterizerList::OnWorkerStartup(int i, u64 affinity)
 	}
 }
 
-void GSRasterizerList::OnWorkerShutdown(int i)
+void GSRasterizerList::OnWorkerDraw(void* context, GSRingHeap::SharedPtr<GSRasterizerData>& item)
 {
+	static_cast<Worker*>(context)->r->Draw(*item.get());
 }
 
 void GSRasterizerList::Queue(const GSRingHeap::SharedPtr<GSRasterizerData>& data)
@@ -1296,8 +1326,17 @@ void GSRasterizerList::Queue(const GSRingHeap::SharedPtr<GSRasterizerData>& data
 			return;
 	}
 
+	/* After every queued draw, on this thread, before the next is queued:
+	 * the draws before and after it keep their order on every row. */
+	if (data->whole)
+	{
+		Sync();
+		m_r[0]->DrawWhole(*data.get());
+		return;
+	}
+
 	int top = r.top >> m_thread_height;
-	int bottom = pcsx2_min_i((r.bottom + (1 << m_thread_height) - 1) >> m_thread_height, top + m_workers.size());
+	int bottom = pcsx2_min_i((r.bottom + (1 << m_thread_height) - 1) >> m_thread_height, top + static_cast<int>(m_threads));
 
 	while (top < bottom)
 	{
@@ -1309,14 +1348,14 @@ void GSRasterizerList::Sync()
 {
 	if (!IsSynced())
 	{
-		for (size_t i = 0; i < m_workers.size(); i++)
+		for (u32 i = 0; i < m_threads; i++)
 			m_workers[i]->Wait();
 	}
 }
 
 bool GSRasterizerList::IsSynced() const
 {
-	for (size_t i = 0; i < m_workers.size(); i++)
+	for (u32 i = 0; i < m_threads; i++)
 	{
 		if (!m_workers[i]->IsEmpty())
 		{
@@ -1327,28 +1366,28 @@ bool GSRasterizerList::IsSynced() const
 	return true;
 }
 
-std::unique_ptr<IRasterizer> GSRasterizerList::Create(int threads)
+IRasterizer* GSRasterizerList::Create(int threads)
 {
 	threads = pcsx2_max_i(threads, 0);
 
 	if (threads == 0)
-		return std::make_unique<GSSingleRasterizer>();
+		return new GSSingleRasterizer();
 
-	std::unique_ptr<GSRasterizerList> rl(new GSRasterizerList(threads));
+	GSRasterizerList* rl = new GSRasterizerList(threads);
 
 	const bool affinity_on = EmuConfig.Cpu.AffinityControlMode != 0;
-	const std::vector<u32>& procs = VMManager::GetSortedProcessorList();
+	u32 proc_count;
+	const u32* procs = VMManager::GetSortedProcessorList(&proc_count);
 	const u32 worker_proc_base = THREAD_VU1 ? 3 : 2;
 	for (int i = 0; i < threads; i++)
 	{
 		u64 affinity = 0;
-		if (affinity_on && (worker_proc_base + i) < procs.size())
+		if (affinity_on && (worker_proc_base + i) < proc_count)
 			affinity = static_cast<u64>(1) << procs[worker_proc_base + i];
-		rl->m_r.push_back(std::unique_ptr<GSRasterizer>(new GSRasterizer(&rl->m_ds, i, threads)));
-		auto& r = *rl->m_r[i];
-		rl->m_workers.push_back(std::unique_ptr<GSWorker>(new GSWorker([i, affinity]() { GSRasterizerList::OnWorkerStartup(i, affinity); },
-			[&r](GSRingHeap::SharedPtr<GSRasterizerData>& item) { r.Draw(*item.get()); },
-			[i]() { GSRasterizerList::OnWorkerShutdown(i); })));
+		rl->m_r[i] = new GSRasterizer(&rl->m_ds, i, threads);
+		rl->m_worker_ctx[i].r        = rl->m_r[i];
+		rl->m_worker_ctx[i].affinity = affinity;
+		rl->m_workers[i] = new GSWorker(GSRasterizerList::OnWorkerStartup, GSRasterizerList::OnWorkerDraw, nullptr, &rl->m_worker_ctx[i]);
 	}
 
 	return rl;

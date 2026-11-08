@@ -19,8 +19,9 @@
 #include "GSVulkanHeap.h"
 #include "GS/Renderers/Vulkan/GSDeviceVK.h"
 #include "GS/Renderers/Common/GSTexture.h"
+#include "GS/Renderers/Common/GSArray.h"
 #include "GS/Renderers/Vulkan/VKLoader.h"
-#include <climits>
+#include <limits.h>
 
 class GSTextureVK final : public GSTexture
 {
@@ -49,8 +50,9 @@ public:
 
 	~GSTextureVK();
 
-	static std::unique_ptr<GSTextureVK> Create(Type type, Format format, int width, int height, int levels);
-	static std::unique_ptr<GSTextureVK> Adopt(
+	/* A new texture, or NULL; the device frees it through its ops. */
+	static GSTextureVK* Create(Type type, Format format, int width, int height, int levels);
+	static GSTextureVK* Adopt(
 		VkImage image, Type type, Format format, int width, int height, int levels, VkFormat vk_format);
 
 	void Destroy(bool defer);
@@ -117,9 +119,16 @@ private:
 	GSVector4i m_map_area = GSVector4i::zero();
 	int m_map_level = INT_MAX;
 
-	// linked framebuffer is combined with depth texture
-	// list of color textures this depth texture is linked to or vice versa
-	std::vector<std::tuple<GSTextureVK*, VkFramebuffer, bool>> m_framebuffers;
+	/* A framebuffer of this texture with another (a colour target's with
+	 * its depth, or the reverse), or with none; each one is on both
+	 * textures' lists, and goes when either is destroyed. */
+	struct LinkedFramebuffer
+	{
+		GSTextureVK* other;
+		VkFramebuffer fb;
+		bool feedback_loop;
+	};
+	gs_array_t m_framebuffers; /* of LinkedFramebuffer */
 };
 
 class GSDownloadTextureVK final : public GSDownloadTexture
@@ -128,7 +137,7 @@ class GSDownloadTextureVK final : public GSDownloadTexture
 public:
 	~GSDownloadTextureVK();
 
-	static std::unique_ptr<GSDownloadTextureVK> Create(u32 width, u32 height, GSTexture::Format format);
+	static GSDownloadTextureVK* Create(u32 width, u32 height, GSTexture::Format format);
 
 	void CopyFromTexture(const GSVector4i& drc, GSTexture* stex, const GSVector4i& src, u32 src_level, bool use_transfer_pitch);
 

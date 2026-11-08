@@ -63,7 +63,7 @@ static unsigned s_drawn;
  * to hold 64 of each of up to two 32-bit words in a row, as a block of GS
  * memory it filled or a readback it took does. */
 static int s_run_frames = SL_FRAMES;
-static unsigned long s_expect_run[2];
+static unsigned long s_expect_run[4];
 /* A case may ask for its frames to be run again from a savestate taken
  * partway, and to come out the same (see sl_rewind). */
 static int s_rewind;
@@ -236,7 +236,7 @@ static unsigned      s_tlb_store;
  * optionally read a number of quadwords back from the GS (a local to host
  * transfer the kick set up) into RAM at 0x200000 + 0x1000 * the kick. */
 #define SL_MAX_QW    1024
-#define SL_MAX_KICKS 4
+#define SL_MAX_KICKS 16
 static unsigned      s_qw_count;
 static unsigned      s_qw[SL_MAX_QW][4];
 /* The reset program may write the last quadword this many more times
@@ -352,6 +352,23 @@ static void case_aa1_line(void)
 	ad(GS_PRIM, 0, 1 | 0x40 | 0x80); /* line, ABE, AA1 */
 	ad(GS_XYZ2, 0, XY(0, 0));
 	ad(GS_XYZ2, 0, XY(2047, 2047));
+}
+
+/* A sprite alpha blended over an opaque one, (Cs - Cd) * As + Cd, with a
+ * colour whose alpha is none of its channels: the blend reads As through
+ * the shader's second output, and a shader built without it blends with
+ * something else (tests/vkpipewarm holds its linked siblings to this). */
+static void case_dual_blend(void)
+{
+	ad_common();
+	ad(GS_RGBAQ, 0x3f800000ul, 0x80204080ul);
+	ad(GS_PRIM, 0, 6);                /* sprite */
+	ad(GS_XYZ2, 0, XY(0, 0));
+	ad(GS_XYZ2, 0, XY(256, 128));
+	ad(GS_RGBAQ, 0x3f800000ul, 0x4020C0FFul);
+	ad(GS_PRIM, 0, 6 | 0x40);         /* sprite, ABE */
+	ad(GS_XYZ2, 0, XY(64, 32));
+	ad(GS_XYZ2, 0, XY(192, 96));
 }
 
 /* Each case on one rasterizer, which takes every row, and again at 2x. */
@@ -654,6 +671,74 @@ static void upload_block(unsigned packets)
 static void case_upload_whole(void) { upload_block(1); }
 static void case_upload_split(void) { upload_block(2); }
 
+/* upload_split with a palette load from block 0 between its two packets:
+ * the renderer writes the first half before the load reads it, and the
+ * second half after, taking only the data it has not written yet. The
+ * block holds 64 words of 0x00123456 as before. */
+static void case_upload_clut_between(void)
+{
+	static const unsigned words[3] = { 0x56123456u, 0x34561234u, 0x12345612u };
+	unsigned p, i, w = 0;
+	qw(5 | 0x8000u, 0x10000000u, 0xEu, 0);                 /* A+D, NLOOP 5, EOP */
+	qw(1, 0, GS_PRMODECONT, 0);
+	qw(0, (1u << 16) | (1u << 24), GS_BITBLTBUF, 0);       /* DBP 0, DBW 1, PSMCT24 */
+	qw(0, 0, GS_TRXPOS, 0);
+	qw(8, 8, GS_TRXREG, 0);
+	qw(0, 0, GS_TRXDIR, 0);                                /* host to local */
+	for (p = 0; p < 2; p++)
+	{
+		if (p)
+		{
+			qw(1 | 0x8000u, 0x10000000u, 0xEu, 0);         /* A+D, NLOOP 1, EOP */
+			qw((0x13u << 20) | (1u << 14), 1u << 29, GS_TEX0_1, 0); /* PSMT8, CBP 0, CPSMCT32, CLD 1 */
+		}
+		qw(6 | 0x8000u, 0x08000000u, 0, 0);                /* IMAGE, NLOOP 6, EOP */
+		for (i = 0; i < 6; i++, w += 4)
+			qw(words[w % 3], words[(w + 1) % 3], words[(w + 2) % 3], words[(w + 3) % 3]);
+	}
+	kick(0, s_qw_count, 0);
+	s_run_frames    = 60;
+	s_expect_run[0] = 0x00123456ul;
+}
+
+/* A 16x8 24-bit upload, its top four rows 0x112233 and its bottom four
+ * 0x445566, read back as 32-bit pixels in two reads of 16 quadwords with
+ * a packet between them: the first read takes the top rows, the second
+ * the bottom ones, 64 words of each in RAM. */
+static void case_readback_parts(void)
+{
+	static const unsigned top[3] = { 0x33112233u, 0x22331122u, 0x11223311u };
+	static const unsigned bottom[3] = { 0x66445566u, 0x55664455u, 0x44556644u };
+	unsigned i, w;
+	unsigned first;
+	qw(5 | 0x8000u, 0x10000000u, 0xEu, 0);                 /* A+D, NLOOP 5, EOP */
+	qw(1, 0, GS_PRMODECONT, 0);
+	qw(0, (1u << 16) | (1u << 24), GS_BITBLTBUF, 0);       /* DBP 0, DBW 1, PSMCT24 */
+	qw(0, 0, GS_TRXPOS, 0);
+	qw(16, 8, GS_TRXREG, 0);
+	qw(0, 0, GS_TRXDIR, 0);                                /* host to local */
+	qw(24 | 0x8000u, 0x08000000u, 0, 0);                   /* IMAGE, NLOOP 24, EOP */
+	for (i = 0, w = 0; i < 12; i++, w += 4)
+		qw(top[w % 3], top[(w + 1) % 3], top[(w + 2) % 3], top[(w + 3) % 3]);
+	for (i = 0, w = 0; i < 12; i++, w += 4)
+		qw(bottom[w % 3], bottom[(w + 1) % 3], bottom[(w + 2) % 3], bottom[(w + 3) % 3]);
+	qw(4 | 0x8000u, 0x10000000u, 0xEu, 0);                 /* A+D, NLOOP 4, EOP */
+	qw(1u << 16, 0, GS_BITBLTBUF, 0);                      /* SBP 0, SBW 1, PSMCT32 */
+	qw(0, 0, GS_TRXPOS, 0);
+	qw(16, 8, GS_TRXREG, 0);
+	qw(1, 0, GS_TRXDIR, 0);                                /* local to host */
+	kick(0, s_qw_count, 0);
+	readback(16);
+	first = s_qw_count;
+	qw(1 | 0x8000u, 0x10000000u, 0xEu, 0);                 /* A+D, NLOOP 1, EOP */
+	qw(1, 0, GS_PRMODECONT, 0);
+	kick(first, s_qw_count - first, 0);
+	readback(16);
+	s_run_frames    = 60;
+	s_expect_run[0] = 0x00112233ul;
+	s_expect_run[1] = 0x00445566ul;
+}
+
 /* Two flat right triangles 4000 pixels on a side that form a square,
  * as a pair of triangles fused into a quad would be: the renderer's
  * tests on their sides and areas hold for coordinates that large (a
@@ -898,6 +983,33 @@ static void case_dirty_whole_target(void)
 	qw((unsigned)XY(64, 64), 0, GS_XYZ2, 0);
 	kick(i, s_qw_count - i, 5);
 	s_run_frames = 40;
+}
+
+/* A frame 640 wide drawn 2047 high: local memory holds 1638 rows of it,
+ * so rows 1638 on land on the rows at the top, which the display shows.
+ * Two shaded triangles, a colour ramp down the height, every row its
+ * own colour: the console draws in order, the rows below last. Drawn on
+ * several rasterizer threads, rows a thread's band apart reach one
+ * address, and the picture must still be the one drawn on one. */
+static void case_wrap_gradient(void)
+{
+	qw(14 | 0x8000u, 0x10000000u, 0xEu, 0);                /* A+D, NLOOP 14, EOP */
+	qw(1, 0, GS_PRMODECONT, 0);
+	qw(10u << 16, 0, GS_FRAME_1, 0);                       /* FBP 0, FBW 10 */
+	qw(0, 1, GS_ZBUF_1, 0);                                /* ZMSK */
+	qw((1u << 16) | (1u << 17), 0, GS_TEST_1, 0);          /* ZTE, ZTST always */
+	qw(0, 0, GS_XYOFFSET, 0);
+	qw(639u << 16, 2046u << 16, GS_SCISSOR, 0);
+	qw(4 | 0x08, 0, GS_PRIM, 0);                           /* a shaded triangle strip */
+	qw(0x00ff1000u, 0x3f800000u, GS_RGBAQ, 0);
+	qw(0, 0, GS_XYZ2, 0);
+	qw((unsigned)XY(640, 0), 0, GS_XYZ2, 0);
+	qw(0x0010ff40u, 0x3f800000u, GS_RGBAQ, 0);
+	qw((unsigned)XY(0, 2047), 0, GS_XYZ2, 0);
+	qw((unsigned)XY(640, 2047), 0, GS_XYZ2, 0);            /* (the strip's second) */
+	qw(0, 0, GS_TEST_1, 0);
+	kick(0, s_qw_count, 0);
+	s_run_frames = 20;
 }
 
 /* Render targets drawn, each a flat triangle of its own colour (a sprite
@@ -1231,6 +1343,11 @@ static void stream_texture(unsigned mode, unsigned fpsm)
 	s_loop = 1;
 	s_loop_kick = s_kick_count;
 	kick(up, s_qw_count + s_qw_repeat - up, 1);
+	kick(up, s_qw_count + s_qw_repeat - up, 0);
+	kick(up, s_qw_count + s_qw_repeat - up, 0);
+	kick(up, s_qw_count + s_qw_repeat - up, 0);
+	kick(up, s_qw_count + s_qw_repeat - up, 0);
+	kick(up, s_qw_count + s_qw_repeat - up, 0);
 	kick(draw, rb - draw, 0);
 	kick(rb, up - rb, 0);
 	readback(fpsm ? 256 : 512);
@@ -1238,6 +1355,156 @@ static void stream_texture(unsigned mode, unsigned fpsm)
 }
 
 static void case_stream_ct32(void) { stream_texture(STREAM_CT32, 0); }
+
+/* A mipmapped PSMT8 texture read at a constant LOD by shaded triangles:
+ * level 0, 32x32 at page 256, is index 1 and level 1, 16x16 at page 257,
+ * index 2, through a palette with entry 1 = 0x80102030 and entry 2 =
+ * 0x80405060; TEX1 fixes the LOD at 1 (LCM, K = 1.0, MXL 1) and the
+ * triangles are Gouraud, their RGB a ramp and their alpha 0x80, so a
+ * colour step is set up for them, and decal without TCC takes the
+ * texel's RGB with the vertex alpha. The quad is the 64 columns read
+ * back, the texture repeated eight times across it: 64 words of level
+ * 1's 0x80405060 a row. The software rasterizer's setup once used the mip clamp slot
+ * as scratch for the colour steps, and the clamped fetch read past the
+ * level. */
+static void case_mip_shaded(void)
+{
+	unsigned i, draw, rb;
+	s_smode1_hi = 0x7;                                     /* NTSC, for a display every renderer shows */
+	s_smode1_lo = 0x40834504u;
+	stream_image(0x3000u, 1, 0, 0, 0, 16, 16, 64);         /* the palette */
+	qw(0, 0x80102030u, 0x80405060u, 0);
+	for (i = 4; i < 256; i += 4)
+		qw(0, 0, 0, 0);
+	stream_image(0x2000u, 1, 0x13u, 0, 0, 32, 32, 64);     /* level 0: index 1 */
+	for (i = 0; i < 64; i++)
+		qw(0x01010101u, 0x01010101u, 0x01010101u, 0x01010101u);
+	stream_image(0x2020u, 1, 0x13u, 0, 0, 16, 16, 16);     /* level 1: index 2 */
+	for (i = 0; i < 16; i++)
+		qw(0x02020202u, 0x02020202u, 0x02020202u, 0x02020202u);
+	kick(0, s_qw_count, 0);
+	draw = s_qw_count;
+	stream_draw_setup(18, 0);
+	qw((1u << 16) | (1u << 17), 0, GS_TEST_1, 0);
+	/* TBP0 page 256, TBW 1, PSMT8, TW 5, TH 5; RGB only, decal, CBP page 384, CLD 1 */
+	qw(0x2000u | (1u << 14) | (0x13u << 20) | (5u << 26) | (1u << 30),
+		(5u >> 2) | (0u << 2) | (1u << 3) | (0x3000u << 5) | (1u << 29), GS_TEX0_1, 0);
+	qw(1u | (1u << 2) | (2u << 6), 16u, GS_TEX1_1, 0);     /* LCM, MXL 1, MMIN nearest mipmap; K 1.0 */
+	qw(0x2020u | (1u << 14), 0, GS_MIPTBP1, 0);           /* TBP1 page 257, TBW1 1 */
+	qw(0, 0, GS_CLAMP_1, 0);
+	qw(4 | 0x08 | 0x10 | 0x100, 0, GS_PRIM, 0);            /* triangle strip, Gouraud, TME, FST */
+	qw(0x80000000u, 0x3f800000u, GS_RGBAQ, 0);              /* RGB ramps across the 64 columns, alpha 0x80 throughout */
+	qw(0, 0, GS_UV, 0);
+	qw((unsigned)XY(224, 224), 0, GS_XYZ2, 0);
+	qw(0x80ffffffu, 0x3f800000u, GS_RGBAQ, 0);
+	qw(256u << 4, 0, GS_UV, 0);                            /* the texture eight times over */
+	qw((unsigned)XY(288, 224), 0, GS_XYZ2, 0);
+	qw(0x80000000u, 0x3f800000u, GS_RGBAQ, 0);
+	qw((256u << 4) << 16, 0, GS_UV, 0);
+	qw((unsigned)XY(224, 288), 0, GS_XYZ2, 0);
+	qw(0x80ffffffu, 0x3f800000u, GS_RGBAQ, 0);
+	qw((256u << 4) | ((256u << 4) << 16), 0, GS_UV, 0);
+	qw((unsigned)XY(288, 288), 0, GS_XYZ2, 0);
+	rb = s_qw_count;
+	stream_readback(0);
+	s_loop = 1;
+	s_loop_kick = s_kick_count;
+	kick(draw, rb - draw, 1);
+	kick(rb, s_qw_count - rb, 0);
+	readback(512);
+	s_run_frames = 60;
+	s_expect_run[0] = 0x80405060ul;
+}
+
+/* Two 16x16 PSMCT32 textures at pages 128 and 129, uploaded once, and
+ * every frame sixteen sprites into the frame at page 0 reading them in
+ * turn, the first texture's the colour 0x80102030 and the second's
+ * 0x80405060, the last two over the rows read back: 64 words of each
+ * a row. A renderer binding its textures through descriptor sets has two
+ * bindings a frame here, not sixteen. */
+static void case_texture_alternate(void)
+{
+	unsigned i, draw, rb;
+	stream_image(0x1000u, 1, 0, 0, 0, 16, 16, 64);
+	for (i = 0; i < 64; i++)
+		qw(0x80102030u, 0x80102030u, 0x80102030u, 0x80102030u);
+	stream_image(0x1020u, 1, 0, 0, 0, 16, 16, 64);
+	for (i = 0; i < 64; i++)
+		qw(0x80405060u, 0x80405060u, 0x80405060u, 0x80405060u);
+	kick(0, s_qw_count, 0);
+	draw = s_qw_count;
+	stream_draw_setup(2 + 16 * 6, 0);
+	qw((1u << 16) | (1u << 17), 0, GS_TEST_1, 0);
+	qw(0, 0, GS_TEX1_1, 0);
+	for (i = 0; i < 16; i++)
+	{
+		/* 128x32 each, down the left; the last two over the rows read back */
+		const unsigned x = (i >= 14) ? 192u : 0u;
+		const unsigned y = (i >= 14) ? 224u + (i - 14) * 32u : (i * 32u) & 511u;
+		qw(((i & 1) ? 0x1020u : 0x1000u) | (1u << 14) | (4u << 26) | (0u << 30), /* TBP0, TBW 1, CT32, TW 4 */
+			1u | (1u << 2) | (1u << 3), GS_TEX0_1, 0);                        /* TH 4, TCC, decal */
+		qw(6 | 0x10 | 0x100, 0, GS_PRIM, 0);
+		qw(0, 0, GS_UV, 0);
+		qw((unsigned)XY(x, y), 0, GS_XYZ2, 0);
+		qw((16u << 4) | ((16u << 4) << 16), 0, GS_UV, 0);
+		qw((unsigned)XY(x + 128, y + 32), 0, GS_XYZ2, 0);
+	}
+	rb = s_qw_count;
+	stream_readback(0);
+	s_loop = 1;
+	s_loop_kick = s_kick_count;
+	kick(draw, rb - draw, 1);
+	kick(rb, s_qw_count - rb, 0);
+	readback(512);
+	s_run_frames = 120;
+	s_expect_run[0] = 0x80102030ul;
+	s_expect_run[1] = 0x80405060ul;
+}
+
+/* A 1024x120 PSMCT32 texture (480 KB, what one IMAGE GIFtag carries) at
+ * page 128 streamed six times every frame, and a sprite reading its first
+ * 34x113 through a region clamp (an extent a hardware renderer keeps a
+ * texture of, neither side a power of two) into the frame at page 0,
+ * read back from the sprite's corner: 64 words of the texel,
+ * 0x80402010, a row. Every frame the uploads take the texture again and
+ * the sprite reads it again, so a renderer making an image for each
+ * texture, and staging buffers for each upload past the few it keeps,
+ * makes them every frame. */
+static void case_stream_clamped(void)
+{
+	unsigned draw, rb, up;
+	draw = s_qw_count;
+	stream_draw_setup(13, 0);
+	qw(6, 0, GS_PRIM, 0);                                  /* a sprite under it, a colour higher each frame */
+	s_bump_qw = s_qw_count;
+	qw(0x00406080u, 0x3f800000u, GS_RGBAQ, 0);
+	qw(0, 0, GS_XYZ2, 0);
+	qw((unsigned)XY(512, 448), 0, GS_XYZ2, 0);
+	qw((1u << 16) | (1u << 17), 0, GS_TEST_1, 0);
+	qw(0x1000u | (16u << 14) | (0u << 20) | (10u << 26) | (1u << 30), /* TBP0 page 128, TBW 16, CT32, TW 10, TH 9 */
+		(9u >> 2) | (1u << 2) | (1u << 3), GS_TEX0_1, 0);  /* TCC, decal */
+	qw(2u | (2u << 2) | (0u << 4) | (33u << 14) | (0u << 24), (112u >> 8), GS_CLAMP_1, 0); /* region clamp 0-33, 0-112 */
+	qw(0, 0, GS_TEX1_1, 0);
+	qw(6 | 0x10 | 0x100, 0, GS_PRIM, 0);                   /* sprite, TME, FST */
+	qw(0, 0, GS_UV, 0);
+	qw(0, 0, GS_XYZ2, 0);
+	qw((34u << 4) | ((113u << 4) << 16), 0, GS_UV, 0);
+	qw((unsigned)XY(256, 256), 0, GS_XYZ2, 0);
+	rb = s_qw_count;
+	stream_readback(0);
+	up = s_qw_count;
+	stream_image(0x1000u, 16, 0, 0, 0, 1024, 120, 30720u);
+	qw(0x80402010u, 0x80402010u, 0x80402010u, 0x80402010u);
+	s_qw_repeat = 30720u - 1;
+	s_loop = 1;
+	s_loop_kick = s_kick_count;
+	kick(up, s_qw_count + s_qw_repeat - up, 1);
+	kick(draw, rb - draw, 0);
+	kick(rb, up - rb, 0);
+	readback(512);
+	s_run_frames = 120;
+	s_expect_run[0] = 0x80402010ul;
+}
 static void case_stream_t8(void) { stream_texture(STREAM_T8, 0); }
 static void case_stream_t8_flat(void) { stream_texture(STREAM_T8_FLAT, 0); }
 static void case_stream_ct24_aem(void) { stream_texture(STREAM_CT24_AEM, 0); }
@@ -1609,6 +1876,126 @@ static void case_clut_scales(void)
 	s_smode1_lo = 0x40834504u;
 	s_run_frames = 120;
 }
+/* Round after round, one vsync apart, four draws of three pipelines: a
+ * line drawn into a frame that a 4-bit texture's CLUT (CSM1) is loaded
+ * from next, as in clut_lines; a sprite of the line's 64x2 source
+ * stretched bilinear over 64x64 pixels of the displayed frame; the 4-bit
+ * sprite, its palette converted from the line's frame on the GPU by a
+ * utility draw that pushes constants of its own; and the stretched
+ * sprite again, beside the first. A renderer that draws every other key
+ * with a pipeline reading its selector from push constants and the rest
+ * with pipelines of their own (LRPS2_TEST_VK_PIPELINES=mixed, which
+ * takes the keys in the order first drawn) draws the stretched sprites
+ * so, the others not: the second must have its key pushed again after
+ * the palette's constants, though nothing in between drew with a key. */
+static void case_sibling_key_after_clut(void)
+{
+	unsigned i, setup, loop;
+	stream_image(0x3000u, 1, 0, 0, 0, 64, 2, 32);
+	for (i = 0; i < 32; i++)
+	{
+		const unsigned t = 0x01030507u * (i + 1) ^ 0x10204080u;
+		qw(t, t ^ 0x00ff00ffu, t * 3u, t ^ 0xff00ff00u);
+	}
+	stream_image(0x2000u, 1, 0x14u, 0, 0, 16, 16, 8);
+	for (i = 0; i < 8; i++)
+		qw(0x76543210u, 0xfedcba98u, 0x01234567u + i, 0x89abcdefu - i);
+	setup = s_qw_count;
+	stream_draw_setup(1 + 33, 0);
+	qw(0x80808080u, 0x3f800000u, GS_RGBAQ, 0); /* bumped each round */
+	/* the line, into the CLUT's frame */
+	qw(CLUT_PAGE | (1u << 16), 0xff000000u, GS_FRAME_1, 0);      /* FBW 1, alpha masked */
+	qw(0x3000u | (1u << 14) | (6u << 26) | (1u << 30), (1u << 2) | (1u << 3), GS_TEX0_1, 0); /* CT32 64x2, TCC, decal */
+	qw(0, 0, GS_TEX1_1, 0);
+	qw(1 | 0x10 | 0x100, 0, GS_PRIM, 0);                          /* line, TME, FST */
+	qw(0 | (8u << 16), 0, GS_UV, 0);
+	qw(0, 0, GS_XYZ2, 0);
+	qw(503u | (8u << 16), 0, GS_UV, 0);
+	qw(126u, 0, GS_XYZ2, 0);
+	/* the stretched sprite */
+	qw(10u << 16, 0, GS_FRAME_1, 0);                              /* the displayed frame */
+	qw(0x60u, 0, GS_TEX1_1, 0);                                   /* MMAG, MMIN linear */
+	qw(6 | 0x10 | 0x100, 0, GS_PRIM, 0);                          /* sprite, TME, FST */
+	qw(0, 0, GS_UV, 0);
+	qw((unsigned)XY(40, 40), 0, GS_XYZ2, 0);
+	qw((64u << 4) | ((2u << 4) << 16), 0, GS_UV, 0);
+	qw((unsigned)XY(104, 104), 0, GS_XYZ2, 0);
+	/* the 4-bit sprite, its CLUT from the line's frame */
+	qw(0x2000u | (1u << 14) | (0x14u << 20) | (4u << 26),
+		1u | (1u << 2) | (1u << 3) | ((CLUT_PAGE * 32u) << 5) | (1u << 29), GS_TEX0_1, 0); /* T4 16x16, CBP, CLD 1 */
+	qw(0, 0, GS_TEX1_1, 0);
+	qw(6 | 0x10 | 0x100, 0, GS_PRIM, 0);
+	qw(0, 0, GS_UV, 0);
+	qw((unsigned)XY(120, 40), 0, GS_XYZ2, 0);
+	qw((16u << 4) | ((16u << 4) << 16), 0, GS_UV, 0);
+	qw((unsigned)XY(184, 104), 0, GS_XYZ2, 0);
+	/* the stretched sprite again */
+	qw(0x3000u | (1u << 14) | (6u << 26) | (1u << 30), (1u << 2) | (1u << 3), GS_TEX0_1, 0);
+	qw(0x60u, 0, GS_TEX1_1, 0);
+	qw(6 | 0x10 | 0x100, 0, GS_PRIM, 0);
+	qw(0, 0, GS_UV, 0);
+	qw((unsigned)XY(200, 40), 0, GS_XYZ2, 0);
+	qw((64u << 4) | ((2u << 4) << 16), 0, GS_UV, 0);
+	qw((unsigned)XY(264, 104), 0, GS_XYZ2, 0);
+	loop = s_qw_count;
+	s_bump_qw = setup + 7;
+	kick(0, setup, 0);
+	s_loop = 1;
+	s_loop_kick = s_kick_count;
+	kick(setup, loop - setup, 1);
+	s_run_frames = 60;
+}
+/* One 1024x512 4-bit texture drawn through 48 palettes in a frame, each
+ * a 48x48 sprite of the whole texture, point sampled. A renderer that
+ * expands a paletted texture to 32 bits once for each palette holds 48
+ * expansions of 2 MB; one that reads it through the palette on the GPU
+ * holds the indices once (512 KB as 8 bits) and the palettes. Each
+ * palette is 16 CT32 entries (CSM1, 8x2) in a block of its own, eight
+ * blocks across a 64-wide buffer at 0x3000 and six down. */
+#define MANY_PAL 48u
+static unsigned many_pal_cbp(unsigned k)
+{
+	static const unsigned char block[4][8] = {
+		{0, 1, 4, 5, 16, 17, 20, 21}, {2, 3, 6, 7, 18, 19, 22, 23},
+		{8, 9, 12, 13, 24, 25, 28, 29}, {10, 11, 14, 15, 26, 27, 30, 31}};
+	const unsigned bx = k % 8u, by = k / 8u;
+	return 0x3000u + (by / 4u) * 32u + block[by % 4u][bx];
+}
+static void case_t4_many_palettes(void)
+{
+	unsigned k, i, up;
+	for (k = 0; k < MANY_PAL; k++)
+	{
+		stream_image(0x3000u, 1, 0, 8u * (k % 8u), 8u * (k / 8u), 8, 2, 4);
+		for (i = 0; i < 4; i++)
+		{
+			const unsigned e = 0x80000000u | ((k * 0x050301u + i * 0x102030u) & 0xffffffu);
+			qw(e, e ^ 0x00400000u, e ^ 0x00004000u, e ^ 0x00000040u);
+		}
+	}
+	stream_draw_setup(2 + MANY_PAL * 5, 0);
+	qw(0, 0, GS_TEX1_1, 0);                                       /* nearest */
+	qw(6 | 0x10 | 0x100, 0, GS_PRIM, 0);                          /* sprite, TME, FST */
+	for (k = 0; k < MANY_PAL; k++)
+	{
+		const unsigned x = 32u + 64u * (k % 8u), y = 32u + 64u * (k / 8u);
+		/* TBP0 0x2000, TBW 16, PSMT4, TW 10, TH 9; TCC, decal, CBP, CLD 1 */
+		qw(0x2000u | (16u << 14) | (0x14u << 20) | (10u << 26) | ((9u & 3u) << 30),
+			(9u >> 2) | (1u << 2) | (1u << 3) | (many_pal_cbp(k) << 5) | (1u << 29), GS_TEX0_1, 0);
+		qw(0, 0, GS_UV, 0);
+		qw((unsigned)XY(x, y), 0, GS_XYZ2, 0);
+		qw((1023u << 4) | ((511u << 4) << 16), 0, GS_UV, 0);
+		qw((unsigned)XY(x + 48u, y + 48u), 0, GS_XYZ2, 0);
+	}
+	up = s_qw_count;
+	stream_image(0x2000u, 16, 0x14u, 0, 0, 1024, 512, 16384);
+	qw(0x76543210u, 0xfedcba98u, 0x01234567u, 0x89abcdefu);
+	s_qw_repeat = 16384 - 1;
+	kick(up, s_qw_count + s_qw_repeat - up, 0);
+	kick(0, up, 0);
+	s_run_frames = 30;
+}
+
 static void case_clut_lines(void) { clut_lines(0); }
 static void case_clut_lines_ramps(void) { clut_lines(4); }
 
@@ -1889,9 +2276,1057 @@ static void case_date_no_depth_full(void)
 	s_run_frames = 60;
 }
 
+/* Draws sampling the frame they draw into, in one batch, as the frame:
+ * 640 wide, 32-bit, at 0. The seed is 0x80F0F0F0 and every sprite
+ * modulates what it reads by half (TFX MODULATE, colour 0x40), so a
+ * block read n times after the seed holds 0xF0 >> n in RGB, 0x80 >> n in
+ * alpha. The tag's NLOOP is filled in once the packet is laid out. */
+#define FB_TEX0_LO (0u | (10u << 14) | (0u << 20) | (10u << 26) | ((9u & 3u) << 30)) /* TBP0 0, TBW 10, CT32, 1024x512 */
+#define FB_TEX0_HI ((9u >> 2) | (1u << 2))                                            /* TCC, TFX MODULATE */
+
+static unsigned feedback_begin(unsigned seed_w, unsigned seed_h)
+{
+	const unsigned tag = s_qw_count;
+	qw(0x8000u, 0x10000000u, 0xEu, 0);                     /* A+D, EOP, NLOOP below */
+	qw(1, 0, GS_PRMODECONT, 0);
+	qw(10u << 16, 0, GS_FRAME_1, 0);                       /* FBP 0, FBW 10, PSMCT32 */
+	qw(0, 1, GS_ZBUF_1, 0);                                /* ZMSK */
+	qw((1u << 16) | (1u << 17), 0, GS_TEST_1, 0);          /* ZTE, ZTST always */
+	qw(0, 0, GS_XYOFFSET, 0);
+	qw(2047u << 16, 2047u << 16, GS_SCISSOR, 0);
+	qw(0, 0x3f800000u, GS_RGBAQ, 0);                       /* the strip black */
+	qw(6, 0, GS_PRIM, 0);
+	qw(0, 0, GS_XYZ2, 0);
+	qw((unsigned)XY(640, seed_h), 0, GS_XYZ2, 0);
+	qw(0x80F0F0F0u, 0x3f800000u, GS_RGBAQ, 0);             /* the seed */
+	qw(0, 0, GS_XYZ2, 0);
+	qw((unsigned)XY(seed_w, seed_h), 0, GS_XYZ2, 0);
+	qw(FB_TEX0_LO, FB_TEX0_HI, GS_TEX0_1, 0);
+	qw(0, 0, GS_TEX1_1, 0);                                /* nearest */
+	qw(0, 0, GS_CLAMP_1, 0);
+	qw(0x40404040u, 0x3f800000u, GS_RGBAQ, 0);             /* half */
+	qw(6 | 0x10 | 0x100, 0, GS_PRIM, 0);                   /* sprite, TME, FST */
+	return tag;
+}
+
+static void feedback_sprite(unsigned u, unsigned v, unsigned x, unsigned y, unsigned w, unsigned h)
+{
+	qw((unsigned)XY(u, v), 0, GS_UV, 0);
+	qw((unsigned)XY(x, y), 0, GS_XYZ2, 0);
+	qw((unsigned)XY(u + w, v + h), 0, GS_UV, 0);
+	qw((unsigned)XY(x + w, y + h), 0, GS_XYZ2, 0);
+}
+
+static void feedback_end(unsigned tag)
+{
+	s_qw[tag][0] = (s_qw_count - tag - 1) | 0x8000u;
+	kick(tag, s_qw_count - tag, 0);
+}
+
+/* Each sprite reads the 8x8 block the one before it wrote, a page to its
+ * left: a page the GS has not read in this batch, so it reads the write.
+ * The third block, at x 192, holds the seed halved three times; drawn
+ * from one copy of the frame taken before the batch, it is black. */
+static void case_feedback_chain(void)
+{
+	const unsigned tag = feedback_begin(8, 8);
+	unsigned k;
+	for (k = 0; k < 3; k++)
+		feedback_sprite(64 * k, 0, 64 * (k + 1), 0, 8, 8);
+	feedback_end(tag);
+	s_expect_run[0] = 0x101E1E1Eul;
+}
+
+/* Three sprites over the same 64x8 area, each reading exactly the pixels
+ * it writes: each reads what the one before it wrote, the area holding
+ * the seed halved three times. Drawn from one copy of the frame taken
+ * before the batch, it holds the seed halved once. */
+static void case_feedback_own_pixel(void)
+{
+	const unsigned tag = feedback_begin(64, 8);
+	unsigned k;
+	for (k = 0; k < 3; k++)
+		feedback_sprite(0, 0, 0, 0, 64, 8);
+	feedback_end(tag);
+	s_expect_run[0] = 0x101E1E1Eul;
+}
+
+/* Four chains like feedback_chain's, a row of blocks each, six sprites
+ * long, laid out a step of every chain at a time: each step reads what
+ * the step before it wrote, so the batch splits five times, into six
+ * runs of four sprites each. The last block of every chain, at x 384,
+ * holds the seed halved six times; a run drawn from the copy of the one
+ * before it, or the batch from one copy, leaves it darker or black. */
+static void case_feedback_runs(void)
+{
+	const unsigned tag = feedback_begin(8, 32);
+	unsigned k, c;
+	for (k = 0; k < 6; k++)
+		for (c = 0; c < 4; c++)
+			feedback_sprite(64 * k, 8 * c, 64 * (k + 1), 8 * c, 8, 8);
+	feedback_end(tag);
+	s_expect_run[0] = 0x02030303ul;
+}
+
+/* A buffer one page column wide at page 8, drawn at its two columns in
+ * turn over the pages of a depth buffer laid out four pages wide, twice,
+ * as two frames would: each time the depth buffer is drawn first, with a
+ * depth test; a
+ * 24-bit Z and a 32-bit colour with its alpha masked clear the first
+ * column together (colour the left half of its pages, Z the right); a
+ * draw into it takes (Cs - Cd) from a frame of 0x80 and lays the second
+ * column's Z down as it goes; the first column is copied out to page 40;
+ * a draw into the second column does the same back. After the second
+ * time, the copy holds 0x404040, the first column the Z the last draw
+ * left there, 0x181818, and the second 0x80 - 0x30; read back from the
+ * second row of pages, which a buffer kept at the depth buffer's width
+ * puts elsewhere. */
+static void column_pass(unsigned zcol2, unsigned zcol1)
+{
+	const unsigned zb = 8;                                 /* page 8, block 0x100 */
+	const unsigned first = s_qw_count;
+	qw(0x8000u, 0x10000000u, 0xEu, 0);                     /* A+D, EOP, NLOOP below */
+	qw(1, 0, GS_PRMODECONT, 0);
+	qw(0, 0, GS_XYOFFSET, 0);
+	qw(2047u << 16, 2047u << 16, GS_SCISSOR, 0);
+	qw((1u << 16) | (1u << 17), 0, GS_TEST_1, 0);          /* ZTE, ZTST always */
+	qw(6, 0, GS_PRIM, 0);                                  /* sprite */
+	/* a depth buffer at page 8, four pages wide, Z 0x777777 */
+	qw(32u | (10u << 16), 0xFFFFFFFFu, GS_FRAME_1, 0);     /* colour all masked */
+	qw(zb | (1u << 24), 0, GS_ZBUF_1, 0);                  /* PSMZ24 */
+	qw((1u << 16) | (2u << 17), 0, GS_TEST_1, 0);          /* ZTE, ZTST GEQUAL */
+	qw(0, 0x777777u, GS_XYZ2, 0);
+	qw((unsigned)XY(640, 64), 0x777777u, GS_XYZ2, 0);
+	qw((1u << 16) | (1u << 17), 0, GS_TEST_1, 0);          /* ZTST always */
+	/* the first column cleared: colour 32 wide, Z 32 wide, at one base */
+	qw(zb | (2u << 16), 0xFF000000u, GS_FRAME_1, 0);       /* FBW 2, alpha masked */
+	qw(0x00404040u, 0x3f800000u, GS_RGBAQ, 0);
+	qw(0, 0x404040u, GS_XYZ2, 0);
+	qw((unsigned)XY(32, 64), 0x404040u, GS_XYZ2, 0);
+	/* (Cs - Cd) from the frame into the first column, Z into the second */
+	qw(0u | (1u << 14) | (6u << 26) | (2u << 30), 0x8u | 1u, GS_TEX0_1, 0); /* TBP 0, TBW 1, CT32, 64x64, DECAL */
+	qw(0x4u | 0x20u | 0x80u, 128u, GS_ALPHA_1, 0);         /* (Cs - Cd) * 128/128 + 0 */
+	qw((zb + 1) | (1u << 24), 0, GS_ZBUF_1, 0);
+	qw(6 | 0x10 | 0x40 | 0x100, 0, GS_PRIM, 0);            /* sprite, TME, ABE, FST */
+	qw(0, 0, GS_UV, 0);
+	qw(0, zcol2, GS_XYZ2, 0);
+	qw((unsigned)XY(64, 64), 0, GS_UV, 0);
+	qw((unsigned)XY(64, 64), zcol2, GS_XYZ2, 0);
+	/* the first column copied out to page 40, 64 wide */
+	qw(40u | (1u << 16), 0, GS_FRAME_1, 0);
+	qw(0, 1, GS_ZBUF_1, 0);                                /* ZMSK */
+	qw((zb * 32u) | (2u << 14) | (7u << 26) | (2u << 30), 0x8u | 1u, GS_TEX0_1, 0); /* TBP 0x100, TBW 2, 128x64 */
+	qw(6 | 0x10 | 0x100, 0, GS_PRIM, 0);                   /* sprite, TME, FST */
+	qw(0, 0, GS_UV, 0);
+	s_qw[first][0] = (s_qw_count - first - 1) | 0x8000u;
+	kick(first, s_qw_count - first, 1);
+	{
+		const unsigned second = s_qw_count;
+		qw(0x8000u, 0x10000000u, 0xEu, 0);                 /* A+D, EOP, NLOOP below */
+		qw(0, 0, GS_XYZ2, 0);
+		qw((unsigned)XY(64, 64), 0, GS_UV, 0);
+		qw((unsigned)XY(64, 64), 0, GS_XYZ2, 0);
+		/* the same into the second column, Z into the first */
+		qw(0u | (1u << 14) | (6u << 26) | (2u << 30), 0x8u | 1u, GS_TEX0_1, 0);
+		qw((zb + 1) | (2u << 16), 0xFF000000u, GS_FRAME_1, 0);
+		qw(zb | (1u << 24), 0, GS_ZBUF_1, 0);
+		qw(6 | 0x10 | 0x40 | 0x100, 0, GS_PRIM, 0);
+		qw(0, 0, GS_UV, 0);
+		qw(0, zcol1, GS_XYZ2, 0);
+		qw((unsigned)XY(64, 64), 0, GS_UV, 0);
+		qw((unsigned)XY(64, 64), zcol1, GS_XYZ2, 0);
+		qw(0, 1, GS_ZBUF_1, 0);
+		s_qw[second][0] = (s_qw_count - second - 1) | 0x8000u;
+		kick(second, s_qw_count - second, 0);
+	}
+}
+
+static void case_column_passes(void)
+{
+	/* the frame of 0x80 at page 0, 64x64 */
+	qw(8 | 0x8000u, 0x10000000u, 0xEu, 0);
+	qw(1, 0, GS_PRMODECONT, 0);
+	qw(0, 0, GS_XYOFFSET, 0);
+	qw(2047u << 16, 2047u << 16, GS_SCISSOR, 0);
+	qw(1u << 16, 0, GS_FRAME_1, 0);
+	qw(0, 1, GS_ZBUF_1, 0);
+	qw(0x80808080u, 0x3f800000u, GS_RGBAQ, 0);
+	qw(6, 0, GS_PRIM, 0);
+	qw(0, 0, GS_XYZ2, 0);
+	kick(0, s_qw_count, 0);
+	{
+		const unsigned first = s_qw_count;
+		qw(1 | 0x8000u, 0x10000000u, 0xEu, 0);
+		qw((unsigned)XY(64, 64), 0, GS_XYZ2, 0);
+		kick(first, s_qw_count - first, 0);
+	}
+	column_pass(0x202020u, 0x101010u);
+	column_pass(0x303030u, 0x181818u);
+	{
+		const unsigned first = s_qw_count;
+		qw(4 | 0x8000u, 0x10000000u, 0xEu, 0);
+		qw((8u * 32u) | (2u << 16), 0, GS_BITBLTBUF, 0);   /* SBP 0x100, SBW 2, PSMCT32 */
+		qw(32u << 16, 0, GS_TRXPOS, 0);                    /* the second row of pages */
+		qw(128, 32, GS_TRXREG, 0);
+		qw(1, 0, GS_TRXDIR, 0);                            /* local to host */
+		kick(first, s_qw_count - first, 2);
+		readback(128 * 32 / 4);
+	}
+	{
+		const unsigned first = s_qw_count;
+		qw(4 | 0x8000u, 0x10000000u, 0xEu, 0);
+		qw((40u * 32u) | (1u << 16), 0, GS_BITBLTBUF, 0);  /* SBP page 40, SBW 1 */
+		qw(32u << 16, 0, GS_TRXPOS, 0);
+		qw(64, 32, GS_TRXREG, 0);
+		qw(1, 0, GS_TRXDIR, 0);
+		kick(first, s_qw_count - first, 1);
+		readback(64 * 32 / 4);
+	}
+	s_run_frames    = 60;
+	s_expect_run[0] = 0x00181818ul;
+	s_expect_run[1] = 0x00505050ul;
+	s_expect_run[2] = 0x00404040ul;
+}
+
+/* A 32-bit buffer at page 9, cbw pages wide, has its alpha laid down
+ * once: 0x40 over its left 64 columns and 0xC0 over the next 64 in its
+ * first row of pages, 0x58 and 0xD8 in its second (indices the palette
+ * stores where they are read). Every
+ * frame after, a 24-bit depth buffer at page 8 is written over its
+ * pages, a colour draw at ebp, ebw pages wide, with its alpha masked
+ * writes its RGB over them too, and a sprite
+ * reads its alpha as PSMT8H through a palette of entry i = i*0x01010101
+ * into the frame at page 0, read back: 64 words of 0x40404040 then of
+ * 0xC0C0C0C0 a row, then 0x58585858 and 0xD8D8D8D8, as nothing since the
+ * first frame wrote the alpha. With big, the alpha is uploaded as PSMT8H
+ * instead, and read as a texture too large for a hardware renderer's
+ * hash cache (see alpha_under_depth_big). */
+static void alpha_under_depth(unsigned cbw, unsigned ebp, unsigned ebw, unsigned ew, unsigned big)
+{
+	/* When big, the alpha is uploaded as PSMT8H rather than drawn, and
+	 * read as a texture 1024x512 (TW 10, TH 9): too large for the
+	 * hardware renderers' hash cache, so a source they lose is uploaded
+	 * again rather than found. */
+	const unsigned tw = big ? 10u : (cbw == 2 ? 7u : 8u);
+	const unsigned th = big ? 9u : 6u;
+	unsigned i, first;
+	qw(0x8000u, 0x10000000u, 0xEu, 0);                     /* A+D, EOP, NLOOP below */
+	qw(1, 0, GS_PRMODECONT, 0);
+	qw(0, 0, GS_XYOFFSET, 0);
+	qw(2047u << 16, 2047u << 16, GS_SCISSOR, 0);
+	qw((1u << 16) | (1u << 17), 0, GS_TEST_1, 0);          /* ZTE, ZTST always */
+	qw(8u, 1, GS_ZBUF_1, 0);                               /* ZMSK */
+	qw(9u | (cbw << 16), 0, GS_FRAME_1, 0);                /* page 9, PSMCT32 */
+	if (!big)
+	{
+		qw(6, 0, GS_PRIM, 0);                              /* sprite */
+		qw(0x40202020u, 0x3f800000u, GS_RGBAQ, 0);
+		qw(0, 0, GS_XYZ2, 0);
+		qw((unsigned)XY(64, 32), 0, GS_XYZ2, 0);
+		qw(0xC0606060u, 0x3f800000u, GS_RGBAQ, 0);
+		qw((unsigned)XY(64, 0), 0, GS_XYZ2, 0);
+		qw((unsigned)XY(128, 32), 0, GS_XYZ2, 0);
+		qw(0x58202020u, 0x3f800000u, GS_RGBAQ, 0);
+		qw((unsigned)XY(0, 32), 0, GS_XYZ2, 0);
+		qw((unsigned)XY(64, 64), 0, GS_XYZ2, 0);
+		qw(0xD8606060u, 0x3f800000u, GS_RGBAQ, 0);
+		qw((unsigned)XY(64, 32), 0, GS_XYZ2, 0);
+		qw((unsigned)XY(128, 64), 0, GS_XYZ2, 0);
+	}
+	qw(0, 0x280u | (1u << 16), GS_BITBLTBUF, 0);           /* the palette at block 0x280, DBW 1 */
+	qw(0, 0, GS_TRXPOS, 0);
+	qw(16, 16, GS_TRXREG, 0);
+	qw(0, 0, GS_TRXDIR, 0);
+	s_qw[0][0] = (s_qw_count - 1) | 0x8000u;
+	qw(64 | 0x8000u, 0x08000000u, 0, 0);                   /* IMAGE, 64 qw, EOP */
+	for (i = 0; i < 256; i += 4)
+		qw(i * 0x01010101u, (i + 1) * 0x01010101u, (i + 2) * 0x01010101u, (i + 3) * 0x01010101u);
+	if (big)
+	{
+		/* the alpha as PSMT8H (eight bits a pixel), a row of 128 at a time */
+		unsigned y;
+		for (y = 0; y < 64; y++)
+		{
+			const unsigned lo = ((y < 32) ? 0x40u : 0x58u) * 0x01010101u, hi = lo + 0x80808080u;
+			stream_image(0x120u, cbw, 0x1Bu, 0, y, 128, 1, 8);
+			for (i = 0; i < 4; i++)
+				qw(lo, lo, lo, lo);
+			for (i = 0; i < 4; i++)
+				qw(hi, hi, hi, hi);
+		}
+	}
+	kick(0, s_qw_count, 0);
+	first = s_qw_count;
+	qw(0x8000u, 0x10000000u, 0xEu, 0);
+	qw(1, 0, GS_PRMODECONT, 0);
+	qw(0, 0, GS_XYOFFSET, 0);
+	qw(2047u << 16, 2047u << 16, GS_SCISSOR, 0);
+	qw((1u << 16) | (1u << 17), 0, GS_TEST_1, 0);
+	/* the scene: colour at page 0, Z24 at page 8, two pages wide */
+	qw(2u << 16, 0, GS_FRAME_1, 0);
+	qw(8u | (1u << 24), 0, GS_ZBUF_1, 0);                  /* PSMZ24 */
+	qw(6, 0, GS_PRIM, 0);
+	s_bump_qw = s_qw_count;
+	qw(0x80101010u, 0x3f800000u, GS_RGBAQ, 0);
+	qw(0, 0x123456u, GS_XYZ2, 0);
+	qw((unsigned)XY(128, 64), 0x123456u, GS_XYZ2, 0);
+	/* an effect over the buffer's pages, alpha masked */
+	qw(ebp | (ebw << 16), 0xFF000000u, GS_FRAME_1, 0);
+	qw(8u, 1, GS_ZBUF_1, 0);                               /* ZMSK */
+	qw(0x80FF00FFu, 0x3f800000u, GS_RGBAQ, 0);
+	qw(0, 0, GS_XYZ2, 0);
+	qw((unsigned)XY(ew, 64), 0, GS_XYZ2, 0);
+	/* the alpha read as PSMT8H through the palette, into the scene */
+	qw(2u << 16, 0, GS_FRAME_1, 0);
+	qw(0x120u | (cbw << 14) | (0x1Bu << 20) | (tw << 26) | ((th & 3u) << 30),
+		(th >> 2) | (1u << 2) | (1u << 3) | (0x280u << 5) | (1u << 29), GS_TEX0_1, 0); /* TH, TCC, DECAL, CBP, CLD */
+	qw(0, 0, GS_TEX1_1, 0);
+	qw(0, 0, GS_CLAMP_1, 0);
+	qw(6 | 0x10 | 0x100, 0, GS_PRIM, 0);                   /* sprite, TME, FST */
+	qw(0, 0, GS_UV, 0);
+	qw(0, 0, GS_XYZ2, 0);
+	qw((unsigned)XY(128, 64), 0, GS_UV, 0);
+	qw((unsigned)XY(128, 64), 0, GS_XYZ2, 0);
+	qw(2u << 16, 0, GS_BITBLTBUF, 0);                      /* SBP 0, SBW 2, PSMCT32 */
+	qw(0, 0, GS_TRXPOS, 0);
+	qw(128, 64, GS_TRXREG, 0);
+	qw(1, 0, GS_TRXDIR, 0);                                /* local to host */
+	s_qw[first][0] = (s_qw_count - first - 1) | 0x8000u;
+	s_loop = 1;
+	s_loop_kick = s_kick_count;
+	kick(first, s_qw_count - first, 1);
+	readback(128 * 64 / 4);
+	s_run_frames    = 120;
+	s_expect_run[0] = 0x40404040ul;
+	s_expect_run[1] = 0xC0C0C0C0ul;
+	s_expect_run[2] = 0x58585858ul;
+	s_expect_run[3] = 0xD8D8D8D8ul;
+}
+
+static void case_alpha_under_depth(void) { alpha_under_depth(2, 9, 2, 128, 0); }
+static void case_alpha_under_depth_wide(void) { alpha_under_depth(4, 9, 4, 256, 0); }
+/* The effect drawn one page wide at the depth buffer's own base. */
+static void case_alpha_under_depth_strip(void) { alpha_under_depth(4, 8, 1, 64, 0); }
+/* The alpha uploaded, read as a texture too large for the hash cache,
+ * the effect one page wide at the depth buffer's base over its first. */
+static void case_alpha_under_depth_big(void) { alpha_under_depth(4, 8, 1, 64, 1); }
+
+
+/* The buffer of alpha_under_depth, two pages wide at page 9, its alpha
+ * laid down once. Every frame after: a shaded colour draw three pages
+ * wide at page 10, with its alpha masked, takes the buffer's second
+ * page; a sprite into it writes a constant 24-bit Z through a depth
+ * buffer three pages wide at page 11, over the buffer's third page; a
+ * shaded colour draw two pages wide from page 8 takes all the buffer's
+ * pages; and a sprite reads the buffer's alpha as PSMT8H through the
+ * palette into the frame at page 0, read back: what was laid down. The
+ * Z written over the third page is RGB there; its alpha is still the
+ * buffer's when the buffer, made over by the later draws, leaves. */
+static void case_alpha_dirtied_parked(void)
+{
+	unsigned i, first;
+	qw(0x8000u, 0x10000000u, 0xEu, 0);
+	qw(1, 0, GS_PRMODECONT, 0);
+	qw(0, 0, GS_XYOFFSET, 0);
+	qw(2047u << 16, 2047u << 16, GS_SCISSOR, 0);
+	qw((1u << 16) | (1u << 17), 0, GS_TEST_1, 0);
+	qw(8u, 1, GS_ZBUF_1, 0);
+	qw(9u | (2u << 16), 0, GS_FRAME_1, 0);                 /* page 9, two pages wide */
+	qw(6, 0, GS_PRIM, 0);
+	qw(0x40202020u, 0x3f800000u, GS_RGBAQ, 0);
+	qw(0, 0, GS_XYZ2, 0);
+	qw((unsigned)XY(64, 32), 0, GS_XYZ2, 0);
+	qw(0xC0606060u, 0x3f800000u, GS_RGBAQ, 0);
+	qw((unsigned)XY(64, 0), 0, GS_XYZ2, 0);
+	qw((unsigned)XY(128, 32), 0, GS_XYZ2, 0);
+	qw(0x58202020u, 0x3f800000u, GS_RGBAQ, 0);
+	qw((unsigned)XY(0, 32), 0, GS_XYZ2, 0);
+	qw((unsigned)XY(64, 64), 0, GS_XYZ2, 0);
+	qw(0xD8606060u, 0x3f800000u, GS_RGBAQ, 0);
+	qw((unsigned)XY(64, 32), 0, GS_XYZ2, 0);
+	qw((unsigned)XY(128, 64), 0, GS_XYZ2, 0);
+	qw(0, 0x280u | (1u << 16), GS_BITBLTBUF, 0);           /* the palette at block 0x280 */
+	qw(0, 0, GS_TRXPOS, 0);
+	qw(16, 16, GS_TRXREG, 0);
+	qw(0, 0, GS_TRXDIR, 0);
+	s_qw[0][0] = (s_qw_count - 1) | 0x8000u;
+	qw(64 | 0x8000u, 0x08000000u, 0, 0);
+	for (i = 0; i < 256; i += 4)
+		qw(i * 0x01010101u, (i + 1) * 0x01010101u, (i + 2) * 0x01010101u, (i + 3) * 0x01010101u);
+	kick(0, s_qw_count, 0);
+	first = s_qw_count;
+	qw(0x8000u, 0x10000000u, 0xEu, 0);
+	qw(1, 0, GS_PRMODECONT, 0);
+	qw(0, 0, GS_XYOFFSET, 0);
+	qw(2047u << 16, 2047u << 16, GS_SCISSOR, 0);
+	qw((1u << 16) | (1u << 17), 0, GS_TEST_1, 0);
+	/* the scene: colour at page 0, Z24 at page 16, two pages wide */
+	qw(2u << 16, 0, GS_FRAME_1, 0);
+	qw(16u | (1u << 24), 0, GS_ZBUF_1, 0);
+	qw(6, 0, GS_PRIM, 0);
+	s_bump_qw = s_qw_count;
+	qw(0x80101010u, 0x3f800000u, GS_RGBAQ, 0);
+	qw(0, 0x123456u, GS_XYZ2, 0);
+	qw((unsigned)XY(128, 64), 0x123456u, GS_XYZ2, 0);
+	/* a buffer three pages wide over the first buffer's second page,
+	 * shaded so that it is drawn rather than cleared */
+	qw(10u | (3u << 16), 0xFF000000u, GS_FRAME_1, 0);
+	qw(8u, 1, GS_ZBUF_1, 0);
+	qw(0x8000FF00u, 0x3f800000u, GS_RGBAQ, 0);
+	qw(0, 0, GS_XYZ2, 0);
+	qw(0x80FF0000u, 0x3f800000u, GS_RGBAQ, 0);
+	qw((unsigned)XY(64, 32), 0, GS_XYZ2, 0);
+	/* into it again, a constant Z through a depth buffer at page 11,
+	 * three pages wide, over the first buffer's third page */
+	qw(11u | (1u << 24), 0, GS_ZBUF_1, 0);
+	qw(0x80FF00FFu, 0x3f800000u, GS_RGBAQ, 0);
+	qw(0, 0x222222u, GS_XYZ2, 0);
+	qw((unsigned)XY(64, 64), 0x222222u, GS_XYZ2, 0);
+	/* a buffer two pages wide from page 8, taking the first buffer's
+	 * pages, shaded */
+	qw(8u | (2u << 16), 0xFF000000u, GS_FRAME_1, 0);
+	qw(8u, 1, GS_ZBUF_1, 0);
+	qw(0x80FFFF00u, 0x3f800000u, GS_RGBAQ, 0);
+	qw(0, 0, GS_XYZ2, 0);
+	qw(0x8000FFFFu, 0x3f800000u, GS_RGBAQ, 0);
+	qw((unsigned)XY(128, 96), 0, GS_XYZ2, 0);
+	/* the alpha read as PSMT8H through the palette, into the scene */
+	qw(2u << 16, 0, GS_FRAME_1, 0);
+	qw(0x120u | (2u << 14) | (0x1Bu << 20) | (7u << 26) | (2u << 30),
+		1u | (1u << 2) | (1u << 3) | (0x280u << 5) | (1u << 29), GS_TEX0_1, 0);
+	qw(0, 0, GS_TEX1_1, 0);
+	qw(0, 0, GS_CLAMP_1, 0);
+	qw(6 | 0x10 | 0x100, 0, GS_PRIM, 0);
+	qw(0, 0, GS_UV, 0);
+	qw(0, 0, GS_XYZ2, 0);
+	qw((unsigned)XY(128, 64), 0, GS_UV, 0);
+	qw((unsigned)XY(128, 64), 0, GS_XYZ2, 0);
+	qw(2u << 16, 0, GS_BITBLTBUF, 0);
+	qw(0, 0, GS_TRXPOS, 0);
+	qw(128, 64, GS_TRXREG, 0);
+	qw(1, 0, GS_TRXDIR, 0);
+	s_qw[first][0] = (s_qw_count - first - 1) | 0x8000u;
+	s_loop = 1;
+	s_loop_kick = s_kick_count;
+	kick(first, s_qw_count - first, 1);
+	readback(128 * 64 / 4);
+	s_run_frames    = 120;
+	s_expect_run[0] = 0x40404040ul;
+	s_expect_run[1] = 0xC0C0C0C0ul;
+	s_expect_run[2] = 0x58585858ul;
+	s_expect_run[3] = 0xD8D8D8D8ul;
+}
+
+/* The buffer of alpha_under_depth at page 20, and a palette of entry i =
+ * i*0x01010101 drawn as points into a buffer one page wide at page 15,
+ * both once. Every frame after, a blended colour draw three pages wide
+ * at page 7, over the palette's page but not its pixels, writes its RGB
+ * at the top left and the bottom right of its buffer, and a sprite reads
+ * the alpha as PSMT8H through the palette into the frame at page 0, read
+ * back: what was laid down. The palette, drawn into a page the wider
+ * buffer takes, is read through it. */
+static void case_palette_engulfed(void)
+{
+	unsigned i, first;
+	qw(0x8000u, 0x10000000u, 0xEu, 0);
+	qw(1, 0, GS_PRMODECONT, 0);
+	qw(0, 0, GS_XYOFFSET, 0);
+	qw(2047u << 16, 2047u << 16, GS_SCISSOR, 0);
+	qw((1u << 16) | (1u << 17), 0, GS_TEST_1, 0);
+	qw(8u, 1, GS_ZBUF_1, 0);
+	qw(20u | (2u << 16), 0, GS_FRAME_1, 0);                /* page 20, two pages wide */
+	qw(6, 0, GS_PRIM, 0);
+	qw(0x40202020u, 0x3f800000u, GS_RGBAQ, 0);
+	qw(0, 0, GS_XYZ2, 0);
+	qw((unsigned)XY(64, 32), 0, GS_XYZ2, 0);
+	qw(0xC0606060u, 0x3f800000u, GS_RGBAQ, 0);
+	qw((unsigned)XY(64, 0), 0, GS_XYZ2, 0);
+	qw((unsigned)XY(128, 32), 0, GS_XYZ2, 0);
+	qw(0x58202020u, 0x3f800000u, GS_RGBAQ, 0);
+	qw((unsigned)XY(0, 32), 0, GS_XYZ2, 0);
+	qw((unsigned)XY(64, 64), 0, GS_XYZ2, 0);
+	qw(0xD8606060u, 0x3f800000u, GS_RGBAQ, 0);
+	qw((unsigned)XY(64, 32), 0, GS_XYZ2, 0);
+	qw((unsigned)XY(128, 64), 0, GS_XYZ2, 0);
+	/* the palette, a point an entry */
+	qw(15u | (1u << 16), 0, GS_FRAME_1, 0);
+	qw(0, 0, GS_PRIM, 0);
+	for (i = 0; i < 256; i++)
+	{
+		qw(i * 0x01010101u, 0x3f800000u, GS_RGBAQ, 0);
+		qw((unsigned)XY(i % 16, i / 16), 0, GS_XYZ2, 0);
+	}
+	s_qw[0][0] = (s_qw_count - 1) | 0x8000u;
+	kick(0, s_qw_count, 0);
+	first = s_qw_count;
+	qw(0x8000u, 0x10000000u, 0xEu, 0);
+	qw(1, 0, GS_PRMODECONT, 0);
+	qw(0, 0, GS_XYOFFSET, 0);
+	qw(2047u << 16, 2047u << 16, GS_SCISSOR, 0);
+	qw((1u << 16) | (1u << 17), 0, GS_TEST_1, 0);
+	qw(8u, 1, GS_ZBUF_1, 0);
+	qw(0x44, 0, GS_ALPHA_1, 0);                            /* (Cs - Cd) * As + Cd */
+	/* the blended draw over the palette's page */
+	qw(7u | (3u << 16), 0xFF000000u, GS_FRAME_1, 0);
+	qw(6 | 0x40, 0, GS_PRIM, 0);                           /* sprite, ABE */
+	s_bump_qw = s_qw_count;
+	qw(0x80404040u, 0x3f800000u, GS_RGBAQ, 0);
+	qw(0, 0, GS_XYZ2, 0);
+	qw((unsigned)XY(128, 112), 0, GS_XYZ2, 0);
+	qw((unsigned)XY(176, 112), 0, GS_XYZ2, 0);
+	qw((unsigned)XY(192, 128), 0, GS_XYZ2, 0);
+	/* the alpha read as PSMT8H through the palette, into the frame */
+	qw(2u << 16, 0, GS_FRAME_1, 0);
+	qw(0x280u | (2u << 14) | (0x1Bu << 20) | (7u << 26) | (2u << 30),
+		1u | (1u << 2) | (1u << 3) | (0x1E0u << 5) | (1u << 29), GS_TEX0_1, 0); /* CBP page 15 */
+	qw(0, 0, GS_TEX1_1, 0);
+	qw(0, 0, GS_CLAMP_1, 0);
+	qw(6 | 0x10 | 0x100, 0, GS_PRIM, 0);
+	qw(0, 0, GS_UV, 0);
+	qw(0, 0, GS_XYZ2, 0);
+	qw((unsigned)XY(128, 64), 0, GS_UV, 0);
+	qw((unsigned)XY(128, 64), 0, GS_XYZ2, 0);
+	qw(2u << 16, 0, GS_BITBLTBUF, 0);
+	qw(0, 0, GS_TRXPOS, 0);
+	qw(128, 64, GS_TRXREG, 0);
+	qw(1, 0, GS_TRXDIR, 0);
+	s_qw[first][0] = (s_qw_count - first - 1) | 0x8000u;
+	s_loop = 1;
+	s_loop_kick = s_kick_count;
+	kick(first, s_qw_count - first, 1);
+	readback(128 * 64 / 4);
+	s_run_frames    = 120;
+	s_expect_run[0] = 0x40404040ul;
+	s_expect_run[1] = 0xC0C0C0C0ul;
+	s_expect_run[2] = 0x58585858ul;
+	s_expect_run[3] = 0xD8D8D8D8ul;
+}
+
+/* A buffer one page wide at page 3, its left half one colour and its
+ * right half two others, 16 columns of each, drawn once. Every frame
+ * after, a sprite reads the right half as a 32x32 texture based at the
+ * page's block 16 (the one at its column 32) and draws it four times
+ * as wide into the frame at page 0, read back: 64 words of each of the
+ * two colours a row. The read is based at a block inside a page the
+ * buffer holds; its texels are the buffer's from that block's place. */
+static void case_block_offset_read(void)
+{
+	unsigned first;
+	qw(0x8000u, 0x10000000u, 0xEu, 0);
+	qw(1, 0, GS_PRMODECONT, 0);
+	qw(0, 0, GS_XYOFFSET, 0);
+	qw(2047u << 16, 2047u << 16, GS_SCISSOR, 0);
+	qw((1u << 16) | (1u << 17), 0, GS_TEST_1, 0);
+	qw(8u, 1, GS_ZBUF_1, 0);
+	qw(3u | (1u << 16), 0, GS_FRAME_1, 0);                 /* page 3, one page wide */
+	qw(6, 0, GS_PRIM, 0);
+	qw(0x20202020u, 0x3f800000u, GS_RGBAQ, 0);
+	qw(0, 0, GS_XYZ2, 0);
+	qw((unsigned)XY(32, 32), 0, GS_XYZ2, 0);
+	qw(0x00112233u, 0x3f800000u, GS_RGBAQ, 0);
+	qw((unsigned)XY(32, 0), 0, GS_XYZ2, 0);
+	qw((unsigned)XY(48, 32), 0, GS_XYZ2, 0);
+	qw(0x00445566u, 0x3f800000u, GS_RGBAQ, 0);
+	qw((unsigned)XY(48, 0), 0, GS_XYZ2, 0);
+	qw((unsigned)XY(64, 32), 0, GS_XYZ2, 0);
+	s_qw[0][0] = (s_qw_count - 1) | 0x8000u;
+	kick(0, s_qw_count, 0);
+	first = s_qw_count;
+	qw(0x8000u, 0x10000000u, 0xEu, 0);
+	qw(1, 0, GS_PRMODECONT, 0);
+	qw(0, 0, GS_XYOFFSET, 0);
+	qw(2047u << 16, 2047u << 16, GS_SCISSOR, 0);
+	qw((1u << 16) | (1u << 17), 0, GS_TEST_1, 0);
+	qw(8u, 1, GS_ZBUF_1, 0);
+	qw(2u << 16, 0, GS_FRAME_1, 0);
+	/* a sprite below the rows read back, a colour higher each frame */
+	qw(6, 0, GS_PRIM, 0);
+	s_bump_qw = s_qw_count;
+	qw(0x80101010u, 0x3f800000u, GS_RGBAQ, 0);
+	qw((unsigned)XY(0, 32), 0, GS_XYZ2, 0);
+	qw((unsigned)XY(64, 64), 0, GS_XYZ2, 0);
+	qw(0x70u | (1u << 14) | (5u << 26) | (1u << 30),      /* block 0x70, TBW 1, PSMCT32, TW 5, TH 5 */
+		1u | (1u << 2) | (1u << 3), GS_TEX0_1, 0);         /* TCC, DECAL */
+	qw(0, 0, GS_TEX1_1, 0);
+	qw(0, 0, GS_CLAMP_1, 0);
+	qw(6 | 0x10 | 0x100, 0, GS_PRIM, 0);
+	qw(0, 0, GS_UV, 0);
+	qw(0, 0, GS_XYZ2, 0);
+	qw((unsigned)XY(32, 32), 0, GS_UV, 0);
+	qw((unsigned)XY(128, 32), 0, GS_XYZ2, 0);
+	qw(2u << 16, 0, GS_BITBLTBUF, 0);
+	qw(0, 0, GS_TRXPOS, 0);
+	qw(128, 32, GS_TRXREG, 0);
+	qw(1, 0, GS_TRXDIR, 0);
+	s_qw[first][0] = (s_qw_count - first - 1) | 0x8000u;
+	s_loop = 1;
+	s_loop_kick = s_kick_count;
+	kick(first, s_qw_count - first, 1);
+	readback(128 * 32 / 4);
+	s_run_frames    = 120;
+	s_expect_run[0] = 0x00112233ul;
+	s_expect_run[1] = 0x00445566ul;
+}
+
+
+/* A buffer one page wide at page 15, one colour, its left half at alpha
+ * 0x80 and its right half at alpha 0x20, drawn once. Every frame after:
+ * a blended draw three pages wide at page 7 of that colour, its alpha
+ * masked, covers the page; then a sprite into the frame at page 0 reads the
+ * page-15 buffer as a texture, twice as wide, blended by its alpha over
+ * black, read back: 64 words of the colour at alpha 0x80, then 64 at a
+ * quarter of it at alpha 0x20, a row. The alpha the page-15 buffer
+ * holds is the wider buffer's once it takes the page: a read of it
+ * needing alpha finds that, not local memory's. */
+static void case_engulfed_alpha(void)
+{
+	unsigned first;
+	qw(0x8000u, 0x10000000u, 0xEu, 0);
+	qw(1, 0, GS_PRMODECONT, 0);
+	qw(0, 0, GS_XYOFFSET, 0);
+	qw(2047u << 16, 2047u << 16, GS_SCISSOR, 0);
+	qw((1u << 16) | (1u << 17), 0, GS_TEST_1, 0);
+	qw(20u, 1, GS_ZBUF_1, 0);
+	qw(15u | (1u << 16), 0, GS_FRAME_1, 0);
+	qw(6, 0, GS_PRIM, 0);
+	qw(0x80102030u, 0x3f800000u, GS_RGBAQ, 0);
+	qw(0, 0, GS_XYZ2, 0);
+	qw((unsigned)XY(16, 32), 0, GS_XYZ2, 0);
+	qw(0x20102030u, 0x3f800000u, GS_RGBAQ, 0);
+	qw((unsigned)XY(16, 0), 0, GS_XYZ2, 0);
+	qw((unsigned)XY(32, 32), 0, GS_XYZ2, 0);
+	s_qw[0][0] = (s_qw_count - 1) | 0x8000u;
+	kick(0, s_qw_count, 0);
+	first = s_qw_count;
+	qw(0x8000u, 0x10000000u, 0xEu, 0);
+	qw(1, 0, GS_PRMODECONT, 0);
+	qw(0, 0, GS_XYOFFSET, 0);
+	qw(2047u << 16, 2047u << 16, GS_SCISSOR, 0);
+	qw((1u << 16) | (1u << 17), 0, GS_TEST_1, 0);
+	qw(20u, 1, GS_ZBUF_1, 0);
+	/* the wider draw taking the page, its alpha masked, blended by a
+	 * fixed alpha of one so it is a draw, not a clear */
+	qw(7u | (3u << 16), 0xFF000000u, GS_FRAME_1, 0);
+	qw(0xA8, 0x80, GS_ALPHA_1, 0);
+	qw(6 | 0x40, 0, GS_PRIM, 0);
+	qw(0x80102030u, 0x3f800000u, GS_RGBAQ, 0);
+	qw(0, 0, GS_XYZ2, 0);
+	qw((unsigned)XY(128, 112), 0, GS_XYZ2, 0);
+	/* a sprite below the rows read back, a colour higher each frame */
+	qw(2u << 16, 0, GS_FRAME_1, 0);
+	s_bump_qw = s_qw_count;
+	qw(0x80101010u, 0x3f800000u, GS_RGBAQ, 0);
+	qw((unsigned)XY(0, 32), 0, GS_XYZ2, 0);
+	qw((unsigned)XY(128, 64), 0, GS_XYZ2, 0);
+	/* the page-15 buffer twice as wide, blended by its alpha over black */
+	qw(0x80000000u, 0x3f800000u, GS_RGBAQ, 0);
+	qw(0, 0, GS_XYZ2, 0);
+	qw((unsigned)XY(128, 32), 0, GS_XYZ2, 0);
+	qw(0x44, 0, GS_ALPHA_1, 0);
+	qw(0x1E0u | (1u << 14) | (5u << 26) | (1u << 30),      /* page 15, TBW 1, PSMCT32, TW 5, TH 5 */
+		1u | (1u << 2) | (1u << 3), GS_TEX0_1, 0);         /* TCC, DECAL */
+	qw(0, 0, GS_TEX1_1, 0);
+	qw(0, 0, GS_CLAMP_1, 0);
+	qw(6 | 0x10 | 0x40 | 0x100, 0, GS_PRIM, 0);
+	qw(0, 0, GS_UV, 0);
+	qw(0, 0, GS_XYZ2, 0);
+	qw((unsigned)XY(32, 32), 0, GS_UV, 0);
+	qw((unsigned)XY(128, 32), 0, GS_XYZ2, 0);
+	qw(2u << 16, 0, GS_BITBLTBUF, 0);
+	qw(0, 0, GS_TRXPOS, 0);
+	qw(128, 32, GS_TRXREG, 0);
+	qw(1, 0, GS_TRXDIR, 0);
+	s_qw[first][0] = (s_qw_count - first - 1) | 0x8000u;
+	s_loop = 1;
+	s_loop_kick = s_kick_count;
+	kick(first, s_qw_count - first, 1);
+	readback(128 * 32 / 4);
+	s_run_frames    = 120;
+	s_expect_run[0] = 0x80102030ul;
+	s_expect_run[1] = 0x2004080Cul;
+}
+
+
+/* A 16x16 8-bit texture, its even rows index 0 and its odd rows index 1,
+ * through a palette whose entry 0 is zero and entry 1 is 0x80808080,
+ * drawn as a sprite four times as wide and eight times as tall with the
+ * magnification filter linear, into a frame two pages wide at page 0,
+ * read back from row 4: each output row is one value across, and the
+ * rows step from one texel row's value to the next by eighths, so rows
+ * of 0x10, 0x30, 0x50 and 0x70 in every channel are read back. The palette
+ * is uploaded, or drawn into a buffer at page 15 a point an entry, which
+ * holds it in place of local memory. */
+static void palette_bilinear(int drawn)
+{
+	unsigned i, first;
+	stream_image(0x2000u, 1, 0x13u, 0, 0, 16, 16, 16);     /* the texture, PSMT8 */
+	for (i = 0; i < 16; i++)
+	{
+		const unsigned v = (i & 1) ? 0x01010101u : 0u;
+		qw(v, v, v, v);
+	}
+	if (!drawn)
+	{
+		stream_image(0x3000u, 1, 0, 0, 0, 16, 16, 64);     /* the palette, 16x16 */
+		qw(0, 0x80808080u, 0, 0);
+		for (i = 4; i < 256; i += 4)
+			qw(0, 0, 0, 0);
+	}
+	else
+	{
+		const unsigned head = s_qw_count;
+		qw(0x8000u, 0x10000000u, 0xEu, 0);
+		qw(1, 0, GS_PRMODECONT, 0);
+		qw(0, 0, GS_XYOFFSET, 0);
+		qw(2047u << 16, 2047u << 16, GS_SCISSOR, 0);
+		qw((1u << 16) | (1u << 17), 0, GS_TEST_1, 0);
+		qw(20u, 1, GS_ZBUF_1, 0);
+		qw(15u | (1u << 16), 0, GS_FRAME_1, 0);
+		qw(0, 0, GS_PRIM, 0);
+		for (i = 0; i < 256; i++)
+		{
+			qw(i == 1 ? 0x80808080u : 0u, 0x3f800000u, GS_RGBAQ, 0);
+			qw((unsigned)XY(i % 16, i / 16), 0, GS_XYZ2, 0);
+		}
+		s_qw[head][0] = (s_qw_count - head - 1) | 0x8000u;
+	}
+	kick(0, s_qw_count, 0);
+	first = s_qw_count;
+	qw(0x8000u, 0x10000000u, 0xEu, 0);
+	qw(1, 0, GS_PRMODECONT, 0);
+	qw(0, 0, GS_XYOFFSET, 0);
+	qw(2047u << 16, 2047u << 16, GS_SCISSOR, 0);
+	qw((1u << 16) | (1u << 17), 0, GS_TEST_1, 0);
+	qw(20u, 1, GS_ZBUF_1, 0);
+	qw(2u << 16, 0, GS_FRAME_1, 0);
+	/* a sprite below the rows read back, a colour higher each frame */
+	qw(6, 0, GS_PRIM, 0);
+	s_bump_qw = s_qw_count;
+	qw(0x80101010u, 0x3f800000u, GS_RGBAQ, 0);
+	qw((unsigned)XY(64, 0), 0, GS_XYZ2, 0);
+	qw((unsigned)XY(128, 128), 0, GS_XYZ2, 0);
+	/* TBP0 0x2000, TBW 1, PSMT8, TW 4, TH 4; TCC, decal, CBP, CLD 1 */
+	qw(0x2000u | (1u << 14) | (0x13u << 20) | (4u << 26),
+		1u | (1u << 2) | (1u << 3) | ((drawn ? 0x1E0u : 0x3000u) << 5) | (1u << 29), GS_TEX0_1, 0);
+	qw(0x20u, 0, GS_TEX1_1, 0);                            /* MMAG linear */
+	qw(0, 0, GS_CLAMP_1, 0);
+	qw(4 | 0x10 | 0x100, 0, GS_PRIM, 0);                   /* triangle strip, TME, FST */
+	qw(0, 0, GS_UV, 0);
+	qw(0, 0, GS_XYZ2, 0);
+	qw(16u << 4, 0, GS_UV, 0);
+	qw((unsigned)XY(64, 0), 0, GS_XYZ2, 0);
+	qw((16u << 4) << 16, 0, GS_UV, 0);
+	qw((unsigned)XY(0, 128), 0, GS_XYZ2, 0);
+	qw((16u << 4) | ((16u << 4) << 16), 0, GS_UV, 0);
+	qw((unsigned)XY(64, 128), 0, GS_XYZ2, 0);
+	qw(2u << 16, 0, GS_BITBLTBUF, 0);
+	qw(4u << 16, 0, GS_TRXPOS, 0);
+	qw(64, 32, GS_TRXREG, 0);
+	qw(1, 0, GS_TRXDIR, 0);
+	s_qw[first][0] = (s_qw_count - first - 1) | 0x8000u;
+	s_loop = 1;
+	s_loop_kick = s_kick_count;
+	kick(first, s_qw_count - first, 1);
+	readback(64 * 32 / 4);
+	s_run_frames    = 120;
+	s_expect_run[0] = 0x10101010ul;
+	s_expect_run[1] = 0x30303030ul;
+	s_expect_run[2] = 0x50505050ul;
+	s_expect_run[3] = 0x70707070ul;
+}
+
+static void case_palette_bilinear(void)
+{
+	palette_bilinear(0);
+}
+
+static void case_palette_bilinear_drawn(void)
+{
+	palette_bilinear(1);
+}
+
+
+/* A palette drawn as a shaded quad over the 16x16 words at page 15, its
+ * colour 0 at the left edge and 0xF0 at the right, so entry n's colour
+ * is the shade at its own word's centre; a 16x16 8-bit texture whose
+ * row r is index r drawn through it as a sprite four times as wide and
+ * eight times as tall with the nearest filter: each run of eight rows
+ * read back is one entry's shade, 64 words of it a row, the shade at
+ * the entry's native pixel whatever the scale the quad was drawn at.
+ * Entries 1 to 4 sit at the second to fifth words of the first row. */
+static void case_palette_shaded(void)
+{
+	unsigned i, first;
+	stream_image(0x2000u, 1, 0x13u, 0, 0, 16, 16, 16);     /* the texture, PSMT8 */
+	for (i = 0; i < 16; i++)
+	{
+		const unsigned v = i * 0x01010101u;
+		qw(v, v, v, v);
+	}
+	{
+		const unsigned head = s_qw_count;
+		qw(0x8000u, 0x10000000u, 0xEu, 0);
+		qw(1, 0, GS_PRMODECONT, 0);
+		qw(0, 0, GS_XYOFFSET, 0);
+		qw(2047u << 16, 2047u << 16, GS_SCISSOR, 0);
+		qw((1u << 16) | (1u << 17), 0, GS_TEST_1, 0);
+		qw(20u, 1, GS_ZBUF_1, 0);
+		qw(15u | (1u << 16), 0, GS_FRAME_1, 0);
+		qw(4 | 0x08, 0, GS_PRIM, 0);                       /* triangle strip, shaded */
+		qw(0x80000000u, 0x3f800000u, GS_RGBAQ, 0);
+		qw(0, 0, GS_XYZ2, 0);
+		qw(0x80F0F0F0u, 0x3f800000u, GS_RGBAQ, 0);
+		qw((unsigned)XY(16, 0), 0, GS_XYZ2, 0);
+		qw(0x80000000u, 0x3f800000u, GS_RGBAQ, 0);
+		qw((unsigned)XY(0, 16), 0, GS_XYZ2, 0);
+		qw(0x80F0F0F0u, 0x3f800000u, GS_RGBAQ, 0);
+		qw((unsigned)XY(16, 16), 0, GS_XYZ2, 0);
+		s_qw[head][0] = (s_qw_count - head - 1) | 0x8000u;
+	}
+	kick(0, s_qw_count, 0);
+	first = s_qw_count;
+	qw(0x8000u, 0x10000000u, 0xEu, 0);
+	qw(1, 0, GS_PRMODECONT, 0);
+	qw(0, 0, GS_XYOFFSET, 0);
+	qw(2047u << 16, 2047u << 16, GS_SCISSOR, 0);
+	qw((1u << 16) | (1u << 17), 0, GS_TEST_1, 0);
+	qw(20u, 1, GS_ZBUF_1, 0);
+	qw(2u << 16, 0, GS_FRAME_1, 0);
+	/* a sprite below the rows read back, a colour higher each frame */
+	qw(6, 0, GS_PRIM, 0);
+	s_bump_qw = s_qw_count;
+	qw(0x80101010u, 0x3f800000u, GS_RGBAQ, 0);
+	qw((unsigned)XY(64, 0), 0, GS_XYZ2, 0);
+	qw((unsigned)XY(128, 128), 0, GS_XYZ2, 0);
+	/* TBP0 0x2000, TBW 1, PSMT8, TW 4, TH 4; TCC, decal, CBP page 15, CLD 1 */
+	qw(0x2000u | (1u << 14) | (0x13u << 20) | (4u << 26),
+		1u | (1u << 2) | (1u << 3) | (0x1E0u << 5) | (1u << 29), GS_TEX0_1, 0);
+	qw(0, 0, GS_TEX1_1, 0);                                /* nearest */
+	qw(0, 0, GS_CLAMP_1, 0);
+	qw(6 | 0x10 | 0x100, 0, GS_PRIM, 0);                   /* sprite, TME, FST */
+	qw(0, 0, GS_UV, 0);
+	qw(0, 0, GS_XYZ2, 0);
+	qw((16u << 4) | ((16u << 4) << 16), 0, GS_UV, 0);
+	qw((unsigned)XY(64, 128), 0, GS_XYZ2, 0);
+	qw(2u << 16, 0, GS_BITBLTBUF, 0);
+	qw(8u << 16, 0, GS_TRXPOS, 0);
+	qw(64, 32, GS_TRXREG, 0);
+	qw(1, 0, GS_TRXDIR, 0);
+	s_qw[first][0] = (s_qw_count - first - 1) | 0x8000u;
+	s_loop = 1;
+	s_loop_kick = s_kick_count;
+	kick(first, s_qw_count - first, 1);
+	readback(64 * 32 / 4);
+	s_run_frames    = 120;
+	s_expect_run[0] = 0x800F0F0Ful;
+	s_expect_run[1] = 0x801E1E1Eul;
+	s_expect_run[2] = 0x802D2D2Dul;
+	s_expect_run[3] = 0x803C3C3Cul;
+}
+
+/* Every frame: a scene 640x448 at page 0, ten pages wide, a colour and
+ * a 24-bit Z a half, the Z through a depth buffer at page 140; a
+ * colour draw two pages wide at page 140, its alpha masked, over the
+ * first 64 columns of its 448 rows, so the depth's pages are its; and
+ * a sprite reading page 140 as a 128x512 texture two pages wide into the
+ * frame, rows of it about the colours' border read back: the colours on
+ * the left, the Z as RGB on the right, under the alpha the memory had.
+ * On GSdx, the
+ * depth buffer's pages are laid out at the draw's width as they are
+ * converted, one draw a run of them, rather than copied over after a
+ * conversion of the whole. */
+static void case_depth_narrowed(void)
+{
+	unsigned draw, rb;
+	s_smode1_hi = 0x7;                                     /* NTSC, for a display every renderer shows */
+	s_smode1_lo = 0x40834504u;
+	draw = s_qw_count;
+	qw(0x8000u, 0x10000000u, 0xEu, 0);
+	qw(1, 0, GS_PRMODECONT, 0);
+	qw(0, 0, GS_XYOFFSET, 0);
+	qw(2047u << 16, 2047u << 16, GS_SCISSOR, 0);
+	qw((1u << 16) | (1u << 17), 0, GS_TEST_1, 0);          /* ZTE, ZTST always */
+	/* the scene: colour at page 0, Z24 at page 140, ten pages wide */
+	qw(10u << 16, 0, GS_FRAME_1, 0);
+	qw(140u | (1u << 24), 0, GS_ZBUF_1, 0);
+	qw(6, 0, GS_PRIM, 0);                                  /* a colour and a Z a half: drawn, not cleared or filled */
+	s_bump_qw = s_qw_count;                                /* a sprite's first colour: bumped, drawn with the second */
+	qw(0x80101010u, 0x3f800000u, GS_RGBAQ, 0);
+	qw(0, 0x123456u, GS_XYZ2, 0);
+	qw((unsigned)XY(320, 448), 0x123456u, GS_XYZ2, 0);
+	qw(0x80202020u, 0x3f800000u, GS_RGBAQ, 0);
+	qw((unsigned)XY(320, 0), 0x234567u, GS_XYZ2, 0);
+	qw((unsigned)XY(640, 448), 0x234567u, GS_XYZ2, 0);
+	/* the colour draw over the depth's pages, two pages wide, alpha
+	 * masked: one colour on the top half, another on the bottom */
+	qw(140u | (2u << 16), 0xFF000000u, GS_FRAME_1, 0);
+	qw(8u, 1, GS_ZBUF_1, 0);                               /* ZMSK */
+	qw(6, 0, GS_PRIM, 0);
+	qw(0x80102030u, 0x3f800000u, GS_RGBAQ, 0);
+	qw(0, 0, GS_XYZ2, 0);
+	qw((unsigned)XY(64, 224), 0, GS_XYZ2, 0);
+	qw(0x80405060u, 0x3f800000u, GS_RGBAQ, 0);
+	qw((unsigned)XY(0, 224), 0, GS_XYZ2, 0);
+	qw((unsigned)XY(64, 448), 0, GS_XYZ2, 0);
+	/* page 140 read as a texture two pages wide into the frame */
+	qw(10u << 16, 0, GS_FRAME_1, 0);
+	qw(0x1180u | (2u << 14) | (7u << 26) | (1u << 30), 2u | (1u << 2) | (1u << 3), GS_TEX0_1, 0);
+	qw(0, 0, GS_TEX1_1, 0);
+	qw(0, 0, GS_CLAMP_1, 0);
+	qw(6 | 0x10 | 0x100, 0, GS_PRIM, 0);
+	qw(0, 0, GS_UV, 0);
+	qw(0, 0, GS_XYZ2, 0);
+	qw((unsigned)XY(128, 448), 0, GS_UV, 0);
+	qw((unsigned)XY(128, 448), 0, GS_XYZ2, 0);
+	s_qw[draw][0] = (s_qw_count - draw - 1) | 0x8000u;
+	rb = s_qw_count;
+	qw(4 | 0x8000u, 0x10000000u, 0xEu, 0);
+	qw(10u << 16, 0, GS_BITBLTBUF, 0);                     /* SBP 0, SBW 10 */
+	qw(200u << 16, 0, GS_TRXPOS, 0);                       /* rows 200 to 263: both colours */
+	qw(128, 64, GS_TRXREG, 0);
+	qw(1, 0, GS_TRXDIR, 0);                                /* local to host */
+	s_loop = 1;
+	s_loop_kick = s_kick_count;
+	kick(draw, rb - draw, 1);
+	kick(rb, s_qw_count - rb, 0);
+	readback(128 * 64 / 4);
+	s_run_frames    = 60;
+	s_expect_run[0] = 0x00102030ul;
+	s_expect_run[1] = 0x00405060ul;
+	s_expect_run[2] = 0x00123456ul;
+}
+
+/* Every frame: a buffer at page 140 drawn four pages wide, 256x320, in
+ * two colours; then drawn five pages wide, 320x256, in two others, the
+ * draw covering every one of its forty pages and keeping nothing; then
+ * read as a texture five pages wide into the frame, read back: the
+ * second pair. On GSdx the buffer's pages move to the other width's
+ * places each time; a draw that covers every page and keeps nothing of
+ * them leaves nothing worth moving, so no page is copied. */
+static void case_width_overwritten(void)
+{
+	unsigned draw, rb;
+	s_smode1_hi = 0x7;                                     /* NTSC, for a display every renderer shows */
+	s_smode1_lo = 0x40834504u;
+	draw = s_qw_count;
+	qw(0x8000u, 0x10000000u, 0xEu, 0);
+	qw(1, 0, GS_PRMODECONT, 0);
+	qw(0, 0, GS_XYOFFSET, 0);
+	qw(2047u << 16, 2047u << 16, GS_SCISSOR, 0);
+	qw((1u << 16) | (1u << 17), 0, GS_TEST_1, 0);          /* ZTE, ZTST always */
+	qw(8u, 1, GS_ZBUF_1, 0);                               /* ZMSK */
+	/* four pages wide: a colour a half */
+	qw(140u | (4u << 16), 0, GS_FRAME_1, 0);
+	qw(6, 0, GS_PRIM, 0);
+	s_bump_qw = s_qw_count;                                /* a sprite's first colour: bumped, drawn with the second */
+	qw(0x80111111u, 0x3f800000u, GS_RGBAQ, 0);
+	qw(0, 0, GS_XYZ2, 0);
+	qw((unsigned)XY(128, 320), 0, GS_XYZ2, 0);
+	qw(0x80222222u, 0x3f800000u, GS_RGBAQ, 0);
+	qw((unsigned)XY(128, 0), 0, GS_XYZ2, 0);
+	qw((unsigned)XY(256, 320), 0, GS_XYZ2, 0);
+	/* five pages wide: two others */
+	qw(140u | (5u << 16), 0, GS_FRAME_1, 0);
+	qw(0x80102030u, 0x3f800000u, GS_RGBAQ, 0);
+	qw(0, 0, GS_XYZ2, 0);
+	qw((unsigned)XY(160, 256), 0, GS_XYZ2, 0);
+	qw(0x80405060u, 0x3f800000u, GS_RGBAQ, 0);
+	qw((unsigned)XY(160, 0), 0, GS_XYZ2, 0);
+	qw((unsigned)XY(320, 256), 0, GS_XYZ2, 0);
+	/* page 140 read as a texture five pages wide into the frame */
+	qw(10u << 16, 0, GS_FRAME_1, 0);
+	qw(0x1180u | (5u << 14) | (9u << 26), 2u | (1u << 2) | (1u << 3), GS_TEX0_1, 0); /* 512x256, TCC, decal */
+	qw(0, 0, GS_TEX1_1, 0);
+	qw(0, 0, GS_CLAMP_1, 0);
+	qw(6 | 0x10 | 0x100, 0, GS_PRIM, 0);
+	qw(0, 0, GS_UV, 0);
+	qw(0, 0, GS_XYZ2, 0);
+	qw((unsigned)XY(320, 256), 0, GS_UV, 0);
+	qw((unsigned)XY(320, 256), 0, GS_XYZ2, 0);
+	s_qw[draw][0] = (s_qw_count - draw - 1) | 0x8000u;
+	rb = s_qw_count;
+	qw(4 | 0x8000u, 0x10000000u, 0xEu, 0);
+	qw(10u << 16, 0, GS_BITBLTBUF, 0);                     /* SBP 0, SBW 10 */
+	qw(0, 0, GS_TRXPOS, 0);
+	qw(256, 32, GS_TRXREG, 0);
+	qw(1, 0, GS_TRXDIR, 0);                                /* local to host */
+	s_loop = 1;
+	s_loop_kick = s_kick_count;
+	kick(draw, rb - draw, 1);
+	kick(rb, s_qw_count - rb, 0);
+	readback(256 * 32 / 4);
+	s_run_frames    = 60;
+	s_expect_run[0] = 0x80102030ul;
+	s_expect_run[1] = 0x80405060ul;
+}
+
+/* A buffer 320x224 at page 140, five pages wide, laid down once in a
+ * colour; every frame after, ten sprites a column of 32 each read it
+ * as a texture, linear, a texel to the side of where they draw, and
+ * draw it back into itself brightened (highlight), until it is white;
+ * its first rows are read back: white. On paraLLEl-GS the columns are
+ * one render pass, the blur in place reading the buffer as it was
+ * before the pass, not one a column, each waiting for the last. */
+static void case_blur_in_place(void)
+{
+	unsigned i, draw, rb;
+	s_smode1_hi = 0x7;                                     /* NTSC, for a display every renderer shows */
+	s_smode1_lo = 0x40834504u;
+	qw(0x8000u, 0x10000000u, 0xEu, 0);
+	qw(1, 0, GS_PRMODECONT, 0);
+	qw(0, 0, GS_XYOFFSET, 0);
+	qw(2047u << 16, 2047u << 16, GS_SCISSOR, 0);
+	qw((1u << 16) | (1u << 17), 0, GS_TEST_1, 0);          /* ZTE, ZTST always */
+	qw(8u, 1, GS_ZBUF_1, 0);                               /* ZMSK */
+	qw(140u | (5u << 16), 0, GS_FRAME_1, 0);
+	qw(6, 0, GS_PRIM, 0);
+	qw(0xFF202020u, 0x3f800000u, GS_RGBAQ, 0);
+	qw(0, 0, GS_XYZ2, 0);
+	qw((unsigned)XY(160, 224), 0, GS_XYZ2, 0);
+	qw(0xFF303030u, 0x3f800000u, GS_RGBAQ, 0);
+	qw((unsigned)XY(160, 0), 0, GS_XYZ2, 0);
+	qw((unsigned)XY(320, 224), 0, GS_XYZ2, 0);
+	s_qw[0][0] = (s_qw_count - 1) | 0x8000u;
+	kick(0, s_qw_count, 0);
+	draw = s_qw_count;
+	qw(0x8000u, 0x10000000u, 0xEu, 0);
+	qw(140u | (5u << 16), 0, GS_FRAME_1, 0);
+	qw(0x1180u | (5u << 14) | (9u << 26), 2u | (1u << 2) | (2u << 3), GS_TEX0_1, 0); /* 512x256, TCC, highlight */
+	qw(1u << 5, 0, GS_TEX1_1, 0);                          /* MMAG linear */
+	qw(0, 0, GS_CLAMP_1, 0);
+	qw(6 | 0x10 | 0x100, 0, GS_PRIM, 0);                   /* sprite, TME, FST */
+	s_bump_qw = s_qw_count;                                /* a sprite's first colour: bumped, drawn with the second */
+	qw(0x10808080u, 0x3f800000u, GS_RGBAQ, 0);
+	for (i = 0; i < 10; i++)
+	{
+		qw(0x10808080u, 0x3f800000u, GS_RGBAQ, 0);         /* unity, plus 0x10 a frame */
+		qw((unsigned)XY(i * 32 + 1, 0) + 0x00080008u, 0, GS_UV, 0);
+		qw((unsigned)XY(i * 32, 0), 0, GS_XYZ2, 0);
+		qw((unsigned)XY(i * 32 + 33, 224) + 0x00080008u, 0, GS_UV, 0);
+		qw((unsigned)XY(i * 32 + 32, 224), 0, GS_XYZ2, 0);
+	}
+	s_qw[draw][0] = (s_qw_count - draw - 1) | 0x8000u;
+	rb = s_qw_count;
+	qw(4 | 0x8000u, 0x10000000u, 0xEu, 0);
+	qw(140u | (5u << 16), 0, GS_BITBLTBUF, 0);             /* SBP page 140, SBW 5 */
+	qw(0, 0, GS_TRXPOS, 0);
+	qw(128, 16, GS_TRXREG, 0);
+	qw(1, 0, GS_TRXDIR, 0);                                /* local to host */
+	s_loop = 1;
+	s_loop_kick = s_kick_count;
+	kick(draw, rb - draw, 1);
+	kick(rb, s_qw_count - rb, 0);
+	readback(128 * 16 / 4);
+	s_run_frames    = 60;
+	s_expect_run[0] = 0xFFFFFFFFul;
+}
+
 static const struct { const char* name; void (*build)(void); const char* scale; } s_cases[] = {
 	{ "aa1_small",       case_aa1_small,    "1" },
 	{ "stream_ct32",     case_stream_ct32,  "1" },
+	{ "stream_clamped",  case_stream_clamped, "1" },
+	{ "texture_alternate", case_texture_alternate, "1" },
+	{ "mip_shaded",      case_mip_shaded,   "1" },
 	{ "stream_t8",       case_stream_t8,    "1" },
 	{ "stream_t8_flat",  case_stream_t8_flat, "1" },
 	{ "stream_ct24_aem", case_stream_ct24_aem, "1" },
@@ -1901,6 +3336,7 @@ static const struct { const char* name; void (*build)(void); const char* scale; 
 	{ "aa1_triangle",    case_aa1_triangle, "1" },
 	{ "aa1_triangle_2x", case_aa1_triangle, "2" },
 	{ "aa1_line",        case_aa1_line,     "1" },
+	{ "dual_blend",      case_dual_blend,   "1" },
 	{ "aa1_line_2x",     case_aa1_line,     "2" },
 	{ "mip_tw8",         case_mip_tw8,      "1" },
 	{ "mip_tw11",        case_mip_tw11,     "1" },
@@ -1914,10 +3350,30 @@ static const struct { const char* name; void (*build)(void); const char* scale; 
 	{ "copy_then_upload", case_copy_then_upload, "1" },
 	{ "readback_t4hh",   case_readback_t4hh, "1" },
 	{ "dest_alpha",      case_dest_alpha,    "1" },
+	{ "feedback_chain",  case_feedback_chain, "1" },
+	{ "feedback_own_pixel", case_feedback_own_pixel, "1" },
+	{ "feedback_runs",   case_feedback_runs, "1" },
 	{ "many_copies",     case_many_copies,   "1" },
 	{ "upload_short",    case_upload_short,  "1" },
 	{ "upload_whole",    case_upload_whole,  "1" },
 	{ "upload_split",    case_upload_split,  "1" },
+	{ "upload_clut_between", case_upload_clut_between, "1" },
+	{ "readback_parts",  case_readback_parts, "1" },
+	{ "column_passes",   case_column_passes, "1" },
+	{ "alpha_under_depth", case_alpha_under_depth, "1" },
+	{ "alpha_under_depth_wide", case_alpha_under_depth_wide, "1" },
+	{ "alpha_under_depth_strip", case_alpha_under_depth_strip, "1" },
+	{ "alpha_under_depth_big", case_alpha_under_depth_big, "1" },
+	{ "alpha_dirtied_parked", case_alpha_dirtied_parked, "1" },
+	{ "depth_narrowed",  case_depth_narrowed, "1" },
+	{ "width_overwritten", case_width_overwritten, "1" },
+	{ "blur_in_place",   case_blur_in_place, "1" },
+	{ "palette_engulfed", case_palette_engulfed, "1" },
+	{ "block_offset_read", case_block_offset_read, "1" },
+	{ "engulfed_alpha",  case_engulfed_alpha, "1" },
+	{ "palette_bilinear", case_palette_bilinear, "1" },
+	{ "palette_bilinear_drawn", case_palette_bilinear_drawn, "1" },
+	{ "palette_shaded", case_palette_shaded, "1" },
 	{ "big_triangles",   case_big_triangles, "1" },
 	{ "present",         case_present,       "1" },
 	{ "points",          case_points,        "1" },
@@ -1934,6 +3390,7 @@ static const struct { const char* name; void (*build)(void); const char* scale; 
 	{ "vram_wrap_read",  case_vram_wrap_read, "1" },
 	{ "frame_on_depth",  case_frame_on_depth, "1" },
 	{ "dirty_whole_target", case_dirty_whole_target, "1" },
+	{ "wrap_gradient",   case_wrap_gradient, "1" },
 	{ "reset_readback",  case_reset_readback, "1" },
 	{ "reset_readback_one", case_reset_readback_one, "1" },
 	{ "readback_two_targets", case_readback_two_targets, "1" },
@@ -1949,6 +3406,8 @@ static const struct { const char* name; void (*build)(void); const char* scale; 
 	{ "split_clear_no_display", case_split_clear_no_display, "1" },
 	{ "frame_on_depth32", case_frame_on_depth32, "1" },
 	{ "depth_states",    case_depth_states,  "1" },
+	{ "sibling_key_after_clut", case_sibling_key_after_clut, "1" },
+	{ "t4_many_palettes", case_t4_many_palettes, "1" },
 	{ "display_large_2x", case_display_large, "2" },
 	{ "frame_low",       case_frame_low,     "1" },
 	{ "frame_low_odd",   case_frame_low_odd, "1" },
@@ -2322,6 +3781,8 @@ int main(int argc, char** argv)
 			return 1;
 		}
 		s_cases[c].build();
+		/* (the frames the case needs, for a frontend that runs it) */
+		printf("frames %d\n", s_run_frames);
 		return sl_write_bios(argv[2]) ? 0 : 1;
 	}
 	for (c = 0; c < sizeof(s_cases) / sizeof(s_cases[0]); c++)
@@ -2406,7 +3867,7 @@ int main(int argc, char** argv)
 			return 6;
 		}
 	}
-	for (i = 0; i < 2; i++)
+	for (i = 0; i < 4; i++)
 		if (s_expect_run[i] && !sl_state_has_run(serialize_size, serialize, s_expect_run[i]))
 		{
 			fprintf(stderr, "swdraw: %s: the state has no run of 64 words of %08lx\n",

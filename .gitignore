@@ -116,6 +116,11 @@ build*/
 /tests/spsc/spsc_test
 /tests/d3d12warm/d3d12warm_test*
 /tests/gshash/gshash_test
+/tests/gsflatmap/gsflatmap_test
+/tests/gsstablemap/gsstablemap_test
+/tests/gsstablemap/gsstablemap_bench
+/tests/gspage2tile/gspage2tile_test
+/tests/gspage2tile/GSPage2Tile.o
 /tests/vkheap/vkheap_test
 /tests/vkspirv/vkspirv
 /tests/vkspirv/vkspirv.exe
@@ -164,6 +169,7 @@ tests/ipu/_streams/
 tests/gsregion/gs_region_repeat
 tests/gsclut/clut_bank_clamp
 tests/gsclut/clut_from_target
+tests/gsclut/clut_load_sync
 tests/gstc/readback_retire
 tests/gstc/upload_dirty
 tests/gsstq/stq_saturate
@@ -253,6 +259,13 @@ tests/ata/*.img
 /tests/gspool/gspool_test
 /tests/gstc/target_budget
 /tests/gstc/hash_keep
+/tests/gstc/zwrite_colour
+/tests/gstc/drop_writeback
+/tests/gstc/park_flush
+/tests/gsautoflush/autoflush_select
+/tests/gsautoflush/pixel_feedback
+/tests/gsautoflush/runs_groups
+/tests/gscopyrect/copyrect_dest
 /tests/gsupscale/hires_mem
 /tests/gsupscale/native_taps
 /tests/gsupscale/sprite_centre
@@ -263,3 +276,11 @@ tests/ata/*.img
 /tests/patch/patch_dbload
 /tests/patch/patch_dbparse
 /tests/patch/patch_ingame
+/tests/patch/*.o
+/tests/gsarray/gsarray_test
+/tests/gsstring/gsstring_test
+/tests/parsenumber/parsenumber_test
+/tests/parsenumber/*.o
+/tests/patch/patch_pnachload
+/tests/hostfs/hostfs_test
+/tests/hostfs/*.o

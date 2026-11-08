@@ -20,14 +20,9 @@
 #include "GS/Renderers/Common/GSDevice.h"
 #include "GSVulkanHeap.h"
 #include "VKStreamBuffer.h"
-#include "common/HashCombine.h"
-#include <array>
-#include <functional>
-#include <map>
-#include <memory>
-#include <string>
-#include <unordered_map>
-#include <vector>
+#include "GS/Renderers/Common/GSKeyHash.h"
+#include "GS/Renderers/Common/GSFlatMap.h"
+#include "GS/Renderers/Common/GSArray.h"
 
 struct vk_init_info_t
 {
@@ -79,10 +74,6 @@ public:
 		 * TFX pipelines: VK_EXT_extended_dynamic_state, or the same
 		 * commands of Vulkan 1.3. */
 		bool vk_ext_extended_dynamic_state : 1;
-		/* Blend enable, blend equation and colour write mask are set on
-		 * the command buffer too, and left out of the TFX keys:
-		 * VK_EXT_extended_dynamic_state3. */
-		bool vk_ext_extended_dynamic_state3 : 1;
 		/* The dynamic siblings are linked from graphics pipeline libraries
 		 * (VK_EXT_graphics_pipeline_library with fast linking): a pixel
 		 * shader part built once per module and render pass, a vertex and
@@ -124,15 +115,6 @@ public:
 		__fi bool IsTestingAndSamplingDepth() const { return ((feedback_loop_flags & FeedbackLoopFlag_ReadDS) != 0); }
 	};
 
-	struct PipelineSelectorHash
-	{
-		std::size_t operator()(const PipelineSelector& e) const noexcept
-		{
-			std::size_t hash = 0;
-			HashCombine(hash, e.vs.key, e.ps.key_hi, e.ps.key_lo, e.dss.key, e.cms.key, e.bs.key, e.key);
-			return hash;
-		}
-	};
 
 	enum : u32
 	{
@@ -167,9 +149,6 @@ public:
 	};
 
        // Returns a list of Vulkan-compatible GPUs.
-       using GPUList = std::vector<VkPhysicalDevice>;
-       using GPUNameList = std::vector<std::string>;
-       static GPUNameList EnumerateGPUNames(VkInstance instance);
 
        // Global state accessors
        __fi gs_vk_heap_t* GetHeap() { return &m_heap; }
@@ -294,7 +273,7 @@ public:
 
        // Allocates a temporary CPU staging buffer, fires the callback with it to populate, then copies to a GPU buffer.
        bool AllocatePreinitializedGPUBuffer(u32 size, VkBuffer* gpu_buffer, gs_vk_alloc_t* gpu_alloc,
-		       VkBufferUsageFlags gpu_usage, const std::function<void(void*)>& fill_callback);
+		       VkBufferUsageFlags gpu_usage, void (*fill_callback)(void* mapped));
 
 private:
        union RenderPassCacheKey
@@ -316,7 +295,16 @@ private:
 	       u32 key;
        };
 
-       using ExtensionList = std::vector<const char*>;
+       /* The extension names a device is created with: the frontend's
+        * required ones, then those of ours the device supports. */
+       struct ExtensionList
+       {
+	       static constexpr u32 MAX_NAMES = 32;
+	       const char* names[MAX_NAMES];
+	       u32 count;
+	       bool Has(const char* name) const;
+	       bool Add(const char* name);
+       };
        bool SelectDeviceExtensions(ExtensionList* extension_list);
        void SelectDeviceFeatures(const VkPhysicalDeviceFeatures* required_features);
        bool CreateDevice(const char** required_device_extensions,
@@ -349,7 +337,7 @@ private:
        {
 	       // [0] - Init (upload) command buffer, [1] - draw command buffer
 	       VkCommandPool command_pool = VK_NULL_HANDLE;
-	       std::array<VkCommandBuffer, 2> command_buffers{VK_NULL_HANDLE, VK_NULL_HANDLE};
+	       VkCommandBuffer command_buffers[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
 	       VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
 	       VkFence fence = VK_NULL_HANDLE;
 	       u64 fence_counter = 0;
@@ -363,7 +351,7 @@ private:
 	       /* Staging buffers this command buffer is reading from. They
 		* go back to the free list when it completes; they are not
 		* destroyed, because the next upload of that size wants one. */
-	       std::vector<StagingBuffer> staging_in_flight;
+	       gs_array_t staging_in_flight; /* of StagingBuffer */
 
 	       /* Cleanup queue: per-frame list of Vulkan resources to be
 		* destroyed once the GPU is done with this command buffer.
@@ -390,8 +378,35 @@ private:
 		       u64 h0;
 		       gs_vk_alloc_t alloc;
 	       };
-	       std::vector<CleanupEntry> cleanup_resources;
+	       gs_array_t cleanup_resources; /* of CleanupEntry */
+
+	       /* The TFX texture and target descriptor sets made on this
+		* command buffer, by what they bind: a draw binding what an
+		* earlier one did takes that one's set rather than a new one,
+		* so a frame cycling through its textures allocates a set per
+		* texture rather than per draw. Open addressing, cleared with
+		* the pool. */
+	       enum { DS_CACHE_SIZE = 1024 };
+	       struct DescriptorSetKey
+	       {
+		       u64 view0;
+		       u64 view1;
+		       u64 sampler;
+		       u32 layout0;
+		       u32 layout1;
+	       };
+	       struct DescriptorSetEntry
+	       {
+		       DescriptorSetKey key;
+		       VkDescriptorSet set;
+	       };
+	       DescriptorSetEntry ds_cache[DS_CACHE_SIZE];
+	       u32 ds_cache_used = 0;
        };
+       /* The cached set for key on the current command buffer, or
+	* VK_NULL_HANDLE; made puts one there. */
+       VkDescriptorSet FindCachedDescriptorSet(const FrameResources::DescriptorSetKey* key) const;
+       void CacheDescriptorSet(const FrameResources::DescriptorSetKey* key, VkDescriptorSet set);
 
        /* Device memory: blocks taken at startup, offsets handed out from
         * them. What VMA used to do, with the decisions in our own file. */
@@ -413,7 +428,7 @@ public:
 private:
 
        /* Upload buffers no command buffer is using. */
-       std::vector<StagingBuffer> m_staging_free;
+       gs_array_t m_staging_free; /* of StagingBuffer */
        u64 m_staging_bytes = 0;
        /* And the ones a command buffer is still reading. This is the one
         * that grows without limit: a buffer per texture upload, given
@@ -421,6 +436,7 @@ private:
         * thousands of uploads in it holds thousands of them at once. */
        u64 m_staging_inflight_bytes = 0;
        void DestroyStagingBuffers();
+       FrameResources::CleanupEntry* PushCleanup();
 
        /* Bytes of image sitting in the cleanup lists, waiting for the
         * command buffer that might still be reading them to finish. */
@@ -442,7 +458,7 @@ private:
        VkQueue m_graphics_queue = VK_NULL_HANDLE;
        u32 m_graphics_queue_family_index = 0;
 
-       std::array<FrameResources, NUM_COMMAND_BUFFERS> m_frame_resources;
+       FrameResources m_frame_resources[NUM_COMMAND_BUFFERS];
        u64 m_next_fence_counter = 1;
        u64 m_completed_fence_counter = 0;
        u32 m_current_frame = 0;
@@ -451,7 +467,11 @@ private:
 
        bool m_last_submit_failed = false;
 
-       std::map<u32, VkRenderPass> m_render_pass_cache;
+       /* Render passes by RenderPassCacheKey (u32 -> VkRenderPass), and
+        * the other way (VkRenderPass -> u32), so a pass restarted after a
+        * submit finds its key without a walk over all of them. GSFlatMap. */
+       gs_flat_map_t m_render_pass_cache;
+       gs_flat_map_t m_render_pass_keys;
 
        VkPhysicalDeviceFeatures m_device_features = {};
        VkPhysicalDeviceProperties m_device_properties = {};
@@ -475,7 +495,7 @@ private:
 	VkSampler m_point_sampler = VK_NULL_HANDLE;
 	VkSampler m_linear_sampler = VK_NULL_HANDLE;
 
-	std::unordered_map<u32, VkSampler> m_samplers;
+	gs_flat_map_t m_samplers; /* SamplerSelector key (u32) -> VkSampler */
 
 public:
 	/* The utility pipelines: one table, by these. */
@@ -531,36 +551,39 @@ public:
 
 private:
 	Modules m_modules = {};
-	std::unordered_map<PipelineSelector, VkPipeline, PipelineSelectorHash> m_tfx_pipelines;
+	/* The maps below are GSFlatMaps from a PipelineSelector to a
+	 * VkPipeline (a null one, VK_NULL_HANDLE, is all zeroes as a new
+	 * entry's value is), but for m_tfx_pending, whose entries are only
+	 * there or not. */
+	gs_flat_map_t m_tfx_pipelines;
 	/* The dynamic siblings, by their selectors (VKDynamicPS); a null one
 	 * is being built on the warm-up thread, or could not be. */
-	std::unordered_map<PipelineSelector, VkPipeline, PipelineSelectorHash> m_tfx_siblings;
+	gs_flat_map_t m_tfx_siblings;
 	/* The keys whose pipelines the warm-up thread is building while their
 	 * draws draw with a sibling. */
-	std::unordered_map<PipelineSelector, u8, PipelineSelectorHash> m_tfx_pending;
+	gs_flat_map_t m_tfx_pending;
+	/* (LRPS2_TEST_VK_PIPELINES=mixed: the keys in the order first drawn,
+	 * each with its place's parity: odd ones drawn with siblings) */
+	gs_flat_map_t m_tfx_test_order;
 	/* The siblings' libraries (vk_ext_graphics_pipeline_library): the pixel
 	 * shader parts by TFXLibraryKey(.., true), the vertex input, vertex
 	 * shader and output parts by TFXLibraryKey(.., false); a null pixel
 	 * shader part is being built on the warm-up thread. */
-	std::unordered_map<PipelineSelector, VkPipeline, PipelineSelectorHash> m_tfx_fs_libs;
-	std::unordered_map<PipelineSelector, VkPipeline, PipelineSelectorHash> m_tfx_state_libs;
+	gs_flat_map_t m_tfx_fs_libs;
+	gs_flat_map_t m_tfx_state_libs;
 	VkPipeline GetTFXLibrary(const PipelineSelector& sibling, bool fragment);
 	bool m_gpl_failed = false; /* a library or a link failed: build whole */
-	/* The blend the draw wants (TFXBlendWord) and what the command buffer
-	 * holds, with vk_ext_extended_dynamic_state3; ~0 for nothing known. */
-	u32 m_blend_key = 0;
-	u32 m_blend_applied = 0;
-	u32 m_blend_dynamic = 0; /* what applied is reset to: ~0, or 0 without */
-	void ApplyBlendState(VkCommandBuffer cmdbuf);
 	/* The draw's pipeline is a sibling: the key it reads, pushed by
 	 * ApplyTFXState. */
 	bool m_tfx_dynamic = false;
 	u32 m_tfx_key[4] = {};
 	u32 m_tfx_key_pushed[4] = {};
+	bool m_tfx_key_stale = true; /* the key to push before the next sibling's draw */
 	/* LRPS2_TEST_VK_PIPELINES: 1 "sync" builds every pipeline on the render
 	 * thread as it is first drawn with, 2 "sibling" draws everything with
 	 * siblings, 3 "async" every new key with its sibling while its own is
-	 * built (tests/vkpipewarm) */
+	 * built, 4 "mixed" every other key with its sibling and the rest with
+	 * their own (tests/vkpipewarm) */
 	u8 m_test_pipelines = 0;
 	/* See GSDevice12: the last pipeline, so a run of draws that share one
 	 * does not hash its selector again. */
@@ -588,6 +611,7 @@ private:
 
 	VkSampler GetSampler(GSHWDrawConfig::SamplerSelector ss);
 	void ClearSamplerCache();
+	void DestroySamplers();
 
 	VkPipeline GetTFXPipeline(const PipelineSelector& p);
 	VkPipeline GetTFXPipelineMissed(const PipelineSelector& p);
@@ -668,10 +692,8 @@ public:
 
 	__fi static GSDeviceVK* GetInstance() { return static_cast<GSDeviceVK*>(g_gs_device); }
 
-	static void GetAdapters(std::vector<std::string>* adapters);
 
 	/// Returns true if Vulkan is suitable as a default for the devices in the system.
-	static bool IsSuitableDefaultRenderer();
 
 	__fi VkRenderPass GetTFXRenderPass(bool rt, bool ds, bool hdr, bool stencil, bool fbl, bool dsp,
 		VkAttachmentLoadOp rt_op, VkAttachmentLoadOp ds_op) const
@@ -694,7 +716,7 @@ public:
 	void DrawIndexedPrimitive();
 	void DrawIndexedPrimitive(int offset, int count);
 
-	GSDownloadTexturePtr CreateDownloadTexture(u32 width, u32 height, GSTexture::Format format);
+	GSDownloadTexture* CreateDownloadTexture(u32 width, u32 height, GSTexture::Format format);
 
 	void CopyRect(GSTexture* sTex, GSTexture* dTex, const GSVector4i& r, u32 destX, u32 destY);
 
@@ -712,7 +734,7 @@ public:
 		VkPipeline pipeline, bool linear, bool allow_discard);
 	void DrawStretchRect(const GSVector4& sRect, const GSVector4& dRect, const GSVector2i& ds);
 
-	void UpdateCLUTTexture(GSTexture* sTex, float sScale, u32 offsetX, u32 offsetY, GSTexture* dTex, u32 dOffset, u32 dSize, u32 samples);
+	void UpdateCLUTTexture(GSTexture* sTex, float sScale, float sSample, u32 offsetX, u32 offsetY, GSTexture* dTex, u32 dOffset, u32 dSize);
 	void ConvertToIndexedTexture(GSTexture* sTex, float sScale, u32 offsetX, u32 offsetY, u32 SBW, u32 SPSM, GSTexture* dTex, u32 DBW, u32 DPSM);
 	void FilteredDownsampleTexture(GSTexture* sTex, GSTexture* dTex, u32 downsample_factor, const GSVector2i& clamp_min, const GSVector4& dRect);
 	void MoveTexels(GSTexture* sTex, GSTexture* dTex, const GSVector4& dRect, const MoveTexelsConstants& cb);
@@ -849,13 +871,13 @@ private:
 	u8 m_dss_key = 0;
 	u8 m_dss_applied = 0;
 
-	std::array<const GSTextureVK*, NUM_TFX_TEXTURES> m_tfx_textures{};
+	const GSTextureVK* m_tfx_textures[NUM_TFX_TEXTURES] = {};
 	VkSampler m_tfx_sampler = VK_NULL_HANDLE;
 	u32 m_tfx_sampler_sel = 0;
 	VkDescriptorSet m_tfx_ubo_descriptor_set = VK_NULL_HANDLE;
 	VkDescriptorSet m_tfx_texture_descriptor_set = VK_NULL_HANDLE;
 	VkDescriptorSet m_tfx_rt_descriptor_set = VK_NULL_HANDLE;
-	std::array<u32, NUM_TFX_DYNAMIC_OFFSETS> m_tfx_dynamic_offsets{};
+	u32 m_tfx_dynamic_offsets[NUM_TFX_DYNAMIC_OFFSETS] = {};
 
 	const GSTextureVK* m_utility_texture = nullptr;
 	VkSampler m_utility_sampler = VK_NULL_HANDLE;
@@ -864,7 +886,7 @@ private:
 	PipelineLayout m_current_pipeline_layout = PipelineLayout::Undefined;
 	VkPipeline m_current_pipeline = VK_NULL_HANDLE;
 
-	std::unique_ptr<GSTextureVK> m_null_texture;
+	GSTextureVK* m_null_texture = nullptr;
 
 	// current pipeline selector - we save this in the struct to avoid re-zeroing it every draw
 	PipelineSelector m_pipeline_selector = {};

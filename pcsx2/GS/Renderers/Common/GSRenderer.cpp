@@ -13,10 +13,7 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <algorithm>
-#include <array>
-#include <deque>
-#include <cmath>
+#include <math.h>
 
 #include "GSRenderer.h"
 #include "../../GSVR.h"

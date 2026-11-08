@@ -22,6 +22,7 @@
 #include "Renderers/Common/GSVertex.h"
 #include "Renderers/Common/GSVertexTrace.h"
 #include "Renderers/Common/GSDevice.h"
+#include "Renderers/Common/GSArray.h"
 #include "GSVector.h"
 
 class GSState;
@@ -51,7 +52,7 @@ struct gs_state_ops
 	bool       (*can_upscale)(GSState* gs);
 	float      (*get_upscale_multiplier)(GSState* gs);
 	float      (*get_texture_scale_factor)(GSState* gs);
-	GSTexture* (*lookup_palette_source)(GSState* gs, u32 CBP, u32 CPSM, u32 CBW, GSVector2i* offset, float* scale, const GSVector2i* size);
+	GSTexture* (*lookup_palette_source)(GSState* gs, u32 CBP, u32 CPSM, u32 CBW, GSVector2i* offset, float* scale, float* sample, const GSVector2i* size);
 	GSTexture* (*get_output)(GSState* gs, int i, float* scale, int* y_offset);
 	GSTexture* (*get_feedback_output)(GSState* gs, float* scale);
 	/* The depth the picture in color, a texture get_output returned, was
@@ -66,6 +67,11 @@ struct gs_state_ops
 	/* A savestate taken in this instance (GSSnapshotSave): keep a copy
 	 * of what is drawn on the GPU under the key. */
 	void       (*snapshot_targets)(GSState* gs, u64 key);
+	/* An auto-flushed batch split into segments: whether the renderer
+	 * draws it at once, each segment reading what the ones before it
+	 * drew (true), or is to be handed one segment at a time (false or
+	 * NULL). Asked with the vertex trace of the whole batch made. */
+	bool       (*can_draw_runs)(GSState* gs);
 };
 
 class GSState : public GSAlignedClass<32>
@@ -86,7 +92,8 @@ private:
 	typedef void (GSState::*GIFPackedRegHandler)(const GIFPackedReg* RESTRICT r);
 
 	GIFPackedRegHandler m_fpGIFPackedRegHandlers[16] = {};
-	GIFPackedRegHandler m_fpGIFPackedRegHandlerXYZ[8][4] = {};
+	/* [plain, auto-flush][prim][XYZF2, XYZF3, XYZ2, XYZ3] */
+	GIFPackedRegHandler m_fpGIFPackedRegHandlerXYZ[2][8][4] = {};
 
 	void CheckFlushes();
 
@@ -104,13 +111,13 @@ private:
 	typedef void (GSState::*GIFRegHandler)(const GIFReg* RESTRICT r);
 
 	GIFRegHandler m_fpGIFRegHandlers[256] = {};
-	GIFRegHandler m_fpGIFRegHandlerXYZ[8][4] = {};
+	GIFRegHandler m_fpGIFRegHandlerXYZ[2][8][4] = {};
 
 	typedef void (GSState::*GIFPackedRegHandlerC)(const GIFPackedReg* RESTRICT r, u32 size);
 
 	GIFPackedRegHandlerC m_fpGIFPackedRegHandlersC[2] = {};
-	GIFPackedRegHandlerC m_fpGIFPackedRegHandlerSTQRGBAXYZF2[8] = {};
-	GIFPackedRegHandlerC m_fpGIFPackedRegHandlerSTQRGBAXYZ2[8] = {};
+	GIFPackedRegHandlerC m_fpGIFPackedRegHandlerSTQRGBAXYZF2[2][8] = {};
+	GIFPackedRegHandlerC m_fpGIFPackedRegHandlerSTQRGBAXYZ2[2][8] = {};
 
 	template<u32 prim, bool auto_flush, bool index_swap> void GIFPackedRegHandlerSTQRGBAXYZF2(const GIFPackedReg* RESTRICT r, u32 size);
 	template<u32 prim, bool auto_flush, bool index_swap> void GIFPackedRegHandlerSTQRGBAXYZ2(const GIFPackedReg* RESTRICT r, u32 size);
@@ -159,7 +166,7 @@ private:
 	void GIFRegHandlerTRXDIR(const GIFReg* RESTRICT r);
 	void GIFRegHandlerHWREG(const GIFReg* RESTRICT r);
 
-	template<bool auto_flush, bool index_swap>
+	template<bool index_swap>
 	void SetPrimHandlers();
 
 	struct GSTransferBuffer
@@ -217,9 +224,31 @@ protected:
 	void NormalizeRestoredRegs();
 
 	void UpdateVertexKick();
+	/* Whether the draw state samples its own frame or Z buffer, so its
+	 * vertex kicks take the auto-flush handlers; re-chosen when it flips. */
+	bool m_autoflush_kick = false;
+	void UpdateAutoFlushKick();
+	/* The batch so far is all primitives reading only the pixels they
+	 * write, and an overlap auto flush would have flushed was let through
+	 * for the draw to take in place (tex-is-fb). */
+	bool m_af_pixel_batch = true;
+	bool m_af_skipped = false;
+	/* Where auto flush would have ended the batch: an index count each,
+	 * the start of a segment that reads what the ones before it drew.
+	 * The batch is drawn whole when the renderer can (can_draw_runs),
+	 * else one segment at a time; detection looks back to the current
+	 * segment's start, over its own draw rect. */
+	enum { AF_MAX_SEGMENTS = 64 };
+	u32 m_af_seg_start[AF_MAX_SEGMENTS] = {};
+	u32 m_af_seg_count = 0;
+	GSVector4i m_af_seg_draw = {};
+	bool m_af_seg_fresh = true;
+	void FlushSegments();
+	bool IsPixelFeedbackPrim(u32 prim, const u32* buff, int n) const;
+	void AutoFlushOverlap(bool pixel);
 
 	void GrowVertexBuffer();
-	bool IsAutoFlushDraw(u32 prim);
+	bool IsAutoFlushDraw();
 	template<u32 prim, bool index_swap>
 	void HandleAutoFlush();
 	void CheckCLUTValidity(u32 prim);
@@ -284,6 +313,11 @@ public:
 	GSDrawingEnvironment m_prev_env = {};
 	const GSDrawingEnvironment* m_draw_env = &m_env;
 	GSDrawingContext* m_context = nullptr;
+	/* Set by a renderer that draws a primitive reading only its own pixels
+	 * correctly however the draw's primitives overlap (tex-is-fb with
+	 * barriers, or framebuffer fetch): auto flush then lets such overlaps
+	 * through. */
+	bool m_pixel_feedback_ok = false;
 	GSVector4i temp_draw_rect = {};
 	/* Counts the times a savestate replaced local memory as a whole. */
 	u32 m_mem_restores = 0;
@@ -322,7 +356,18 @@ public:
 	bool m_channel_shuffle = false;
 	u8 m_scanmask_used = 0;
 	int m_backed_up_ctx = 0;
-	std::vector<GSUploadQueue> m_draw_transfers;
+	/* The EE's transfers into local memory since the draws stopped
+	 * preloading them, in order (GSUploadQueue), for the targets made
+	 * from them: pushed, read back from the end, walked backwards and
+	 * cut at the front. In a gs_array. */
+	gs_array_t m_draw_transfers;
+	__fi GSUploadQueue* DrawTransfers() { return GS_ARRAY_ITEMS(&m_draw_transfers, GSUploadQueue); }
+	__fi u32 DrawTransferCount() const { return static_cast<u32>(m_draw_transfers.count); }
+	__fi GSUploadQueue& LastDrawTransfer() { return DrawTransfers()[m_draw_transfers.count - 1]; }
+	__fi void PopDrawTransfer() { m_draw_transfers.count--; }
+	__fi void EraseDrawTransfer(u32 i) { gs_array_erase(&m_draw_transfers, i); }
+	__fi void ClearDrawTransfers() { m_draw_transfers.count = 0; }
+	void PushDrawTransfer(const GSUploadQueue& transfer);
 	NoGapsType m_primitive_covers_without_gaps;
 	GSVector4i m_r = {};
 	GSVector4i m_r_no_scissor = {};
@@ -388,7 +433,9 @@ public:
 	};
 
 	PRIM_OVERLAP m_prim_overlap = PRIM_OVERLAP_UNKNOW;
-	std::vector<size_t> m_drawlist;
+	/* The sprites of a draw in runs that do not overlap, a count a run
+	 * (u32), for the device to draw a run at a time between barriers. */
+	gs_array_t m_drawlist;
 
 	struct GSPCRTCRegs
 	{
@@ -520,9 +567,9 @@ public:
 	bool  CanUpscale()            { return (m_ops && m_ops->can_upscale) ? m_ops->can_upscale(this) : false; }
 	float GetUpscaleMultiplier()  { return (m_ops && m_ops->get_upscale_multiplier) ? m_ops->get_upscale_multiplier(this) : 1.0f; }
 	float GetTextureScaleFactor() { return (m_ops && m_ops->get_texture_scale_factor) ? m_ops->get_texture_scale_factor(this) : 1.0f; }
-	GSTexture* LookupPaletteSource(u32 CBP, u32 CPSM, u32 CBW, GSVector2i& offset, float* scale, const GSVector2i& size)
+	GSTexture* LookupPaletteSource(u32 CBP, u32 CPSM, u32 CBW, GSVector2i& offset, float* scale, float* sample, const GSVector2i& size)
 	{
-		return (m_ops && m_ops->lookup_palette_source) ? m_ops->lookup_palette_source(this, CBP, CPSM, CBW, &offset, scale, &size) : nullptr;
+		return (m_ops && m_ops->lookup_palette_source) ? m_ops->lookup_palette_source(this, CBP, CPSM, CBW, &offset, scale, sample, &size) : nullptr;
 	}
 	bool IsIdleFrame() const;
 

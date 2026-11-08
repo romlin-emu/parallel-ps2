@@ -120,6 +120,7 @@ int main(int argc, char **argv)
          "float2 p0 = (gi + (un - un0) / rx * step(1.0001f, ts)) * ts + 0.5f;");
    fail += check_shader(dir, "OpenGL/tfx_fs.glsl",
          "vec2 p0 = (gi + (un - un0) / rx * step(1.0001f, ts)) * ts + 0.5f;");
+   /* Vulkan declares p0 before the palette branch. */
    fail += check_shader(dir, "Vulkan/shaders/tfx.glsl",
          "p0 = (gi + (un - un0) / rx * step(1.0001f, ts)) * ts + 0.5f;");
 

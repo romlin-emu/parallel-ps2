@@ -113,7 +113,7 @@ set(pcsx2Sources
 	Gif.cpp
 	Gif_Unit.cpp
 	GS.cpp
-	HostFS.cpp
+	HostFS.c
 	Hw.cpp
 	Interpreter.cpp
 	IopBios.cpp
@@ -133,7 +133,6 @@ set(pcsx2Sources
 	MTVU.cpp
 	MultitapProtocol.cpp
 	FormatString.cpp
-	StringView.cpp
 	Patch.cpp
 	Pcsx2Config.cpp
 	PerformanceMetrics.cpp
@@ -201,7 +200,6 @@ set(pcsx2Headers
 	MemoryTypes.h
 	MultitapProtocol.h
 	FormatString.h
-	StringView.h
 	ParseNumber.h
 	Patch.h
 	PerformanceMetrics.h
@@ -352,6 +350,9 @@ set(pcsx2GSSources
 	GS/Renderers/HW/GSHwHack.cpp
 	GS/Renderers/HW/GSRendererHW.cpp
 	GS/Renderers/HW/GSObjectPool.c
+	GS/Renderers/Common/GSFlatMap.c
+	GS/Renderers/Common/GSStableMap.c
+	GS/GSPage2Tile.c
 	GS/Renderers/HW/GSHashTable.c
 	GS/Renderers/HW/GSAlphaRange.h
 	GS/Renderers/HW/GSHashTable.h
@@ -363,8 +364,8 @@ set(pcsx2GSSources
 	GS/Renderers/Common/GSStableGroup.h
 	GS/Renderers/Common/GSRetireRing.c
 	GS/Renderers/Common/GSRetireRing.h
-	GS/Renderers/HW/GSScratch.c
-	GS/Renderers/HW/GSScratch.h
+	GS/Renderers/Common/GSScratch.c
+	GS/Renderers/Common/GSScratch.h
 	GS/Renderers/HW/GSObjectPool.h
 	GS/Renderers/HW/GSTextureCache.cpp
 	GS/Renderers/HW/GSTextureReplacementLoaders.cpp
@@ -402,6 +403,12 @@ set(pcsx2GSHeaders
 	GS/Renderers/Common/GSDevice.h
 	GS/Renderers/Common/GSDirtyRect.h
 	GS/Renderers/Common/GSFastList.h
+	GS/Renderers/Common/GSKeyHash.h
+	GS/Renderers/Common/GSArray.h
+	GS/Renderers/Common/GSString.h
+	GS/Renderers/Common/GSFlatMap.h
+	GS/Renderers/Common/GSStableMap.h
+	GS/GSPage2Tile.h
 	GS/Renderers/Common/GSCodeReserve.h
 	GS/Renderers/Common/GSFunctionMap.h
 	GS/Renderers/Common/GSRenderer.h

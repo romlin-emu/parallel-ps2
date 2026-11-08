@@ -56,53 +56,80 @@ const char* SettingInfo::StringDefaultValue() const
 
 bool SettingInfo::BooleanDefaultValue() const
 {
-	return default_value ? ParseNumber::FromChars<bool>(default_value).value_or(false) : false;
+	bool value = false;
+	if (default_value)
+		parse_number_bool(default_value, strlen(default_value), &value);
+	return value;
 }
 
 s32 SettingInfo::IntegerDefaultValue() const
 {
-	return default_value ? ParseNumber::FromChars<s32>(default_value).value_or(0) : 0;
+	s32 value = 0;
+	if (default_value)
+		parse_number_s32(default_value, strlen(default_value), 10, &value);
+	return value;
 }
 
 s32 SettingInfo::IntegerMinValue() const
 {
 	static constexpr s32 fallback_value = INT32_MIN;
-	return min_value ? ParseNumber::FromChars<s32>(min_value).value_or(fallback_value) : fallback_value;
+	s32 value = fallback_value;
+	if (min_value)
+		parse_number_s32(min_value, strlen(min_value), 10, &value);
+	return value;
 }
 
 s32 SettingInfo::IntegerMaxValue() const
 {
 	static constexpr s32 fallback_value = INT32_MAX;
-	return max_value ? ParseNumber::FromChars<s32>(max_value).value_or(fallback_value) : fallback_value;
+	s32 value = fallback_value;
+	if (max_value)
+		parse_number_s32(max_value, strlen(max_value), 10, &value);
+	return value;
 }
 
 s32 SettingInfo::IntegerStepValue() const
 {
 	static constexpr s32 fallback_value = 1;
-	return step_value ? ParseNumber::FromChars<s32>(step_value).value_or(fallback_value) : fallback_value;
+	s32 value = fallback_value;
+	if (step_value)
+		parse_number_s32(step_value, strlen(step_value), 10, &value);
+	return value;
 }
 
 float SettingInfo::FloatDefaultValue() const
 {
-	return default_value ? ParseNumber::FromChars<float>(default_value).value_or(0.0f) : 0.0f;
+	float value = 0.0f;
+	if (default_value)
+		parse_number_float(default_value, strlen(default_value), &value);
+	return value;
 }
 
 float SettingInfo::FloatMinValue() const
 {
 	static constexpr float fallback_value = FLT_MIN;
-	return min_value ? ParseNumber::FromChars<float>(min_value).value_or(fallback_value) : fallback_value;
+	float value = fallback_value;
+	if (min_value)
+		parse_number_float(min_value, strlen(min_value), &value);
+	return value;
 }
 
 float SettingInfo::FloatMaxValue() const
 {
 	static constexpr float fallback_value = FLT_MAX;
-	return max_value ? ParseNumber::FromChars<float>(max_value).value_or(fallback_value) : fallback_value;
+	float value = fallback_value;
+	if (max_value)
+		parse_number_float(max_value, strlen(max_value), &value);
+	return value;
 }
 
 float SettingInfo::FloatStepValue() const
 {
 	static constexpr float fallback_value = 0.1f;
-	return step_value ? ParseNumber::FromChars<float>(step_value).value_or(fallback_value) : fallback_value;
+	float value = fallback_value;
+	if (step_value)
+		parse_number_float(step_value, strlen(step_value), &value);
+	return value;
 }
 
 namespace EmuFolders
@@ -133,15 +160,18 @@ const char* Pcsx2Config::SpeedhackOptions::GetSpeedHackName(SpeedHack id)
 	return s_speed_hack_names[static_cast<u32>(id)];
 }
 
-std::optional<SpeedHack> Pcsx2Config::SpeedhackOptions::ParseSpeedHackName(const std::string_view& name)
+bool Pcsx2Config::SpeedhackOptions::ParseSpeedHackName(const char* name, size_t len, SpeedHack* out)
 {
 	for (u32 i = 0; i < C89_ARRAY_SIZE(s_speed_hack_names); i++)
 	{
-		if (name == s_speed_hack_names[i])
-			return static_cast<SpeedHack>(i);
+		if (strlen(s_speed_hack_names[i]) == len && memcmp(s_speed_hack_names[i], name, len) == 0)
+		{
+			*out = static_cast<SpeedHack>(i);
+			return true;
+		}
 	}
 
-	return std::nullopt;
+	return false;
 }
 
 void Pcsx2Config::SpeedhackOptions::Set(SpeedHack id, int value)
@@ -333,14 +363,12 @@ Pcsx2Config::GSOptions::GSOptions()
 
 	HWDownloadMode = GSHardwareDownloadMode::Enabled;
 	GPUPaletteConversion = false;
-	AutoFlushSW = true;
 	PreloadFrameWithGSData = false;
 	Mipmap = true;
 
 	ManualUserHacks = false;
 	NativeScalingSet = false;
 	UserHacks_AlignSpriteX = false;
-	UserHacks_AutoFlush = GSHWAutoFlushLevel::Disabled;
 	UserHacks_CPUFBConversion = false;
 	UserHacks_ReadTCOnClose = false;
 	UserHacks_DisableDepthSupport = false;
@@ -349,7 +377,6 @@ Pcsx2Config::GSOptions::GSOptions()
 	UserHacks_DisableRenderFixes = false;
 	UserHacks_MergePPSprite = false;
 	UserHacks_ForceEvenSpritePosition = false;
-	UserHacks_BilinearHack = GSBilinearDirtyMode::Automatic;
 	UserHacks_NativePaletteDraw = false;
 	UserHacks_Limit24BitDepth = GSLimit24BitDepth::Disabled;
 
@@ -393,7 +420,6 @@ bool Pcsx2Config::GSOptions::OptionsAreEqual(const GSOptions& right) const
 		OpEqu(SkipDrawEnd) &&
 		OpEqu(SkipDrawStart) &&
 
-		OpEqu(UserHacks_AutoFlush) &&
 		OpEqu(UserHacks_HalfPixelOffset) &&
 		OpEqu(UserHacks_RoundSprite) &&
 		OpEqu(UserHacks_NativeScaling) &&
@@ -404,7 +430,6 @@ bool Pcsx2Config::GSOptions::OptionsAreEqual(const GSOptions& right) const
 		OpEqu(UserHacks_CPUSpriteRenderLevel) &&
 		OpEqu(UserHacks_CPUCLUTRender) &&
 		OpEqu(UserHacks_TextureInsideRt) &&
-		OpEqu(UserHacks_BilinearHack) &&
 		OpEqu(UserHacks_Limit24BitDepth) &&
 		OpEqu(OverrideTextureBarriers) &&
 		OpEqu(Adapter) &&
@@ -449,7 +474,6 @@ void Pcsx2Config::GSOptions::MaskUserHacks()
 	UserHacks_RoundSprite = 0;
 	if (!NativeScalingSet)
 		UserHacks_NativeScaling = GSNativeScaling::NativeScaling_Normal;
-	UserHacks_AutoFlush = GSHWAutoFlushLevel::Disabled;
 	GPUPaletteConversion = false;
 	PreloadFrameWithGSData = false;
 	UserHacks_DisablePartialInvalidation = false;
@@ -463,7 +487,6 @@ void Pcsx2Config::GSOptions::MaskUserHacks()
 	UserHacks_CPUSpriteRenderBW = 0;
 	UserHacks_CPUSpriteRenderLevel = 0;
 	UserHacks_CPUCLUTRender = 0;
-	UserHacks_BilinearHack = GSBilinearDirtyMode::Automatic;
 	SkipDrawStart = 0;
 	SkipDrawEnd = 0;
 }
@@ -476,7 +499,6 @@ void Pcsx2Config::GSOptions::MaskUpscalingHacks()
 	UserHacks_AlignSpriteX = false;
 	UserHacks_MergePPSprite = false;
 	UserHacks_ForceEvenSpritePosition = false;
-	UserHacks_BilinearHack = GSBilinearDirtyMode::Automatic;
 	UserHacks_NativePaletteDraw = false;
 	UserHacks_Limit24BitDepth = GSLimit24BitDepth::Disabled;
 	UserHacks_HalfPixelOffset = GSHalfPixelOffset::Off;

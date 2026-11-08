@@ -16,9 +16,10 @@
 #include <retro_atomic.h>
 #include "common/Pcsx2Defs.h"
 #include <memalign.h>
-#include <cstring> /* memcpy/memset */
+#include <string.h> /* memcpy/memset */
 
 #include "GSRendererSW.h"
+#include "../Common/GSKeyHash.h"
 
 MULTI_ISA_UNSHARED_IMPL;
 
@@ -78,13 +79,62 @@ static void HiresTexRelease(GSRendererSW::HiresTex* t)
 	}
 }
 
+/* The pages a buffer's rect spans, from the one its top left is in:
+ * [*first, *first + span), in pages from the buffer's base, the span
+ * past GS_MAX_PAGES where rows wrap local memory onto rows above them.
+ * Without a width every row is the first, so the span is all of it
+ * once the rect is more than a page row high. */
+static u32 BufferPageSpan(u32 bw, u32 psm, const GSVector4i& r, u32* first)
+{
+	const GSVector2i& pgs = GSLocalMemory::m_psm[psm].pgs;
+	const u32 top = static_cast<u32>(r.top) / pgs.y, bottom = static_cast<u32>(r.bottom - 1) / pgs.y;
+	const u32 left = static_cast<u32>(r.left) / pgs.x, right = static_cast<u32>(r.right - 1) / pgs.x;
+	if (bw == 0)
+	{
+		*first = left;
+		return (bottom > top) ? GS_MAX_PAGES + 1 : right - left + 1;
+	}
+	*first = top * bw + left;
+	return (bottom * bw + right) - *first + 1;
+}
+
+/* Whether the rect's rows reach one another's memory, so threads drawing
+ * bands of rows would write (or read what another writes) at one address
+ * in no set order: the frame or the depth buffer wrapping local memory,
+ * or the two overlapping where one is written. The console draws in
+ * order; drawn whole, so does this. */
+static bool DrawsOverItself(const GSDrawingContext* context, bool fb, bool zb, bool write, const GSVector4i& r)
+{
+	u32 ff = 0, zf = 0, fspan = 0, zspan = 0;
+	if (r.rempty())
+		return false;
+	if (fb)
+	{
+		fspan = BufferPageSpan(context->FRAME.FBW, context->FRAME.PSM, r, &ff);
+		if (fspan > GS_MAX_PAGES)
+			return true;
+		ff = (ff + context->FRAME.FBP) % GS_MAX_PAGES;
+	}
+	if (zb)
+	{
+		zspan = BufferPageSpan(context->FRAME.FBW, context->ZBUF.PSM, r, &zf);
+		if (zspan > GS_MAX_PAGES)
+			return true;
+		zf = (zf + context->ZBUF.ZBP) % GS_MAX_PAGES;
+	}
+	/* two runs of pages round the 512 overlap where either starts in the
+	 * other */
+	return fb && zb && write
+		&& (((zf - ff) % GS_MAX_PAGES) < fspan || ((ff - zf) % GS_MAX_PAGES) < zspan);
+}
+
 GSRendererSW::GSRendererSW(int threads)
 	: GSRenderer(), m_fzb(NULL)
 {
 	m_ops = &s_sw_ops;
 	m_nativeres = true; // ignore ini, sw is always native
 
-	m_tc = std::make_unique<GSTextureCacheSW>();
+	m_tc = new GSTextureCacheSW();
 	m_rl = GSRasterizerList::Create(threads);
 
 	m_output_size = 1024 * 1024 * sizeof(u32);
@@ -103,6 +153,7 @@ GSRendererSW::GSRendererSW(int threads)
 		}
 	}
 	gs_hr_pages_reset(&m_hr_pages);
+	gs_flat_map_init(&m_hr_offsets, sizeof(u64), sizeof(HiresOffset*));
 
 	for (retro_atomic_int_t& p : m_fzb_pages)
 		retro_atomic_store_release_int(&p, 0);
@@ -144,8 +195,10 @@ void GSRendererSW::Destroy()
 {
 	int i;
 	// Need to destroy worker queue first to stop any pending thread work
-	m_rl.reset();
-	m_tc.reset();
+	delete m_rl;
+	m_rl = nullptr;
+	delete m_tc;
+	m_tc = nullptr;
 
 	for (i = 0; i < 3; i++)
 	{
@@ -157,9 +210,13 @@ void GSRendererSW::Destroy()
 	m_output      = nullptr;
 	m_output_size = 0;
 
-	for (auto& it : m_hr_offsets)
-		memalign_free(it.second);
-	m_hr_offsets.clear();
+	for (size_t slot = 0; slot < GS_FLAT_MAP_SLOTS(&m_hr_offsets); slot++)
+		if (GS_FLAT_MAP_USED(&m_hr_offsets, slot))
+			memalign_free(*static_cast<HiresOffset**>(GS_FLAT_MAP_VALUE(&m_hr_offsets, slot)));
+	gs_flat_map_free(&m_hr_offsets);
+	free(m_hr_colbuf);
+	m_hr_colbuf      = nullptr;
+	m_hr_colbuf_size = 0;
 	for (i = 0; i < 64; i++)
 	{
 		free(m_hr_layout[i]);
@@ -182,7 +239,7 @@ void GSRendererSW::VSync(u32 field, bool registers_written, bool idle_frame)
 
 	m_tc->IncAge();
 
-	m_draw_transfers.clear();
+	ClearDrawTransfers();
 }
 
 GSTexture* GSRendererSW::GetOutput(int i, float& scale, int& y_offset)
@@ -383,7 +440,9 @@ GSTexture* GSRendererSW::GetOutputHires(int index, const GSPCRTCRegs::PCRTCDispl
 	HiresRestored();
 	HiresRefresh(m_mem.GetOffset(fb.Block(), fb.FBW, fb.PSM), fb.PSM, GSVector4i(off_x, off_y, off_x + w, off_y + h));
 
-	m_hr_colbuf.resize(W);
+	u32* const colbuf = HiresColBuf(W);
+	if (!colbuf)
+		return m_texture[index];
 	/* straight into the texture's upload if it maps */
 	{
 		const GSVector4i out2(0, 0, W, H);
@@ -391,14 +450,14 @@ GSTexture* GSRendererSW::GetOutputHires(int index, const GSPCRTCRegs::PCRTCDispl
 		if (m_texture[index]->Map(m, &out2))
 		{
 			gs_hr_read(l, m_hr_vm, fb.FBP, fb.FBW, off_x, off_y, W, H, kind, texa.TA0, texa.TA1,
-				reinterpret_cast<unsigned*>(m.bits), m.pitch, m_hr_colbuf.data());
+				reinterpret_cast<unsigned*>(m.bits), m.pitch, colbuf);
 			m_texture[index]->Unmap();
 			return m_texture[index];
 		}
 	}
 	if (!HiresOutput(static_cast<size_t>(W) * H))
 		return m_texture[index];
-	gs_hr_read(l, m_hr_vm, fb.FBP, fb.FBW, off_x, off_y, W, H, kind, texa.TA0, texa.TA1, m_hr_output, W * 4, m_hr_colbuf.data());
+	gs_hr_read(l, m_hr_vm, fb.FBP, fb.FBW, off_x, off_y, W, H, kind, texa.TA0, texa.TA1, m_hr_output, W * 4, colbuf);
 
 	m_texture[index]->Update(GSVector4i(0, 0, W, H), m_hr_output, W * 4);
 
@@ -549,6 +608,9 @@ void GSRendererSW::Draw()
 
 	if (!GetScanlineGlobalData(sd))
 		return;
+
+	sd->whole = DrawsOverItself(context, sd->global.sel.fb, sd->global.sel.zb,
+		sd->global.sel.fwrite || sd->global.sel.zwrite, r);
 
 	GSOffset::PageLooper* fb_pages = NULL;
 	GSOffset::PageLooper* zb_pages = NULL;
@@ -953,6 +1015,20 @@ const gs_hr_layout_t* GSRendererSW::HiresLayout(u32 psm)
 	return l;
 }
 
+/* Room for count colours in the hires read row, kept at the widest. */
+u32* GSRendererSW::HiresColBuf(size_t count)
+{
+	if (count > m_hr_colbuf_size)
+	{
+		u32* grown = static_cast<u32*>(realloc(m_hr_colbuf, count * sizeof(u32)));
+		if (!grown)
+			return nullptr;
+		m_hr_colbuf      = grown;
+		m_hr_colbuf_size = count;
+	}
+	return m_hr_colbuf;
+}
+
 /* The current frame and z buffer's tables in the 2x memory, in the
  * sixteen-bit units the scanline code adds. */
 const GSRendererSW::HiresOffset* GSRendererSW::HiresOffsets()
@@ -960,14 +1036,17 @@ const GSRendererSW::HiresOffset* GSRendererSW::HiresOffsets()
 	const GIFRegFRAME& FRAME = m_context->FRAME;
 	const GIFRegZBUF& ZBUF = m_context->ZBUF;
 	const u64 hash = m_context->offset.fzb4->hash;
-	const auto it = m_hr_offsets.find(hash);
+	const size_t key_hash = gs_key_hash(&hash, sizeof(hash));
+	HiresOffset** const found = static_cast<HiresOffset**>(gs_flat_map_find(&m_hr_offsets, &hash, sizeof(hash), key_hash));
 	const gs_hr_layout_t* fl;
 	const gs_hr_layout_t* zl;
 	HiresOffset* o;
+	HiresOffset** slot;
+	int inserted;
 	int i;
 
-	if (it != m_hr_offsets.end())
-		return it->second;
+	if (found)
+		return *found;
 
 	o = static_cast<HiresOffset*>(memalign_alloc(VECTOR_ALIGNMENT, sizeof(HiresOffset)));
 	if (!o)
@@ -986,7 +1065,10 @@ const GSRendererSW::HiresOffset* GSRendererSW::HiresOffsets()
 		o->col[i].y = zl ? static_cast<int>(gs_hr_col(zl, i * 4) * (zl->elem_bytes / 2)) : 0;
 	}
 
-	m_hr_offsets[hash] = o;
+	slot = static_cast<HiresOffset**>(gs_flat_map_insert(&m_hr_offsets, &hash, key_hash, &inserted));
+	if (!slot)
+		abort(); /* out of memory, as the map's operator[] did without exceptions */
+	*slot = o;
 	return o;
 }
 
@@ -1203,8 +1285,13 @@ GSRendererSW::HiresTex* GSRendererSW::HiresTextureRead(const SharedData* sd)
 	t->tw = tw;
 	retro_atomic_store_release_int(&t->refs, 2); /* the draw's and the cache's */
 
-	m_hr_colbuf.resize(n);
-	addr = m_hr_colbuf.data();
+	addr = HiresColBuf(n);
+	if (!addr)
+	{
+		memalign_free(t->texels);
+		memalign_free(t);
+		return nullptr;
+	}
 
 	for (y = r.top; y < r.bottom; y++)
 	{
@@ -1295,6 +1382,7 @@ void GSRendererSW::DrawHires(SharedData* sd)
 	hd->scanmsk_value = sd->scanmsk_value;
 	hd->scissor = sd->scissor << 1;
 	hd->bbox = sd->bbox << 1;
+	hd->whole = sd->whole;
 
 	memcpy(static_cast<void*>(hd->vertex), sd->vertex, sizeof(GSVertexSW) * sd->vertex_count);
 	memcpy(hd->index, sd->index, sizeof(u16) * sd->index_count);

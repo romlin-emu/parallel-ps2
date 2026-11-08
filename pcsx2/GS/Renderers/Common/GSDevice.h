@@ -17,9 +17,8 @@
 
 #include "GSRetireRing.h"
 
-#include <array>
 
-#include "common/HashCombine.h"
+#include "GSKeyHash.h"
 #include "common/WindowInfo.h"
 
 #include "../../GS.h"
@@ -30,7 +29,6 @@
 #include "GSTexture.h"
 #include "GSShaderEnums.h"
 #include "GSVertex.h"
-#include <memory>
 
 enum class ShaderConvert
 {
@@ -475,11 +473,11 @@ struct alignas(16) GSHWDrawConfig
 #pragma pack(pop)
 	struct PSSelectorHash
 	{
-		std::size_t operator()(const PSSelector& p) const
+		size_t operator()(const PSSelector& p) const
 		{
-			std::size_t h = 0;
-			HashCombine(h, p.key_lo, p.key_hi);
-			return h;
+			/* Equality is key_lo and key_hi alone: hash exactly those. */
+			const u64 words[2] = {p.key_lo, p.key_hi};
+			return gs_key_hash(words, sizeof(words));
 		}
 	};
 #pragma pack(push, 1)
@@ -736,7 +734,8 @@ struct alignas(16) GSHWDrawConfig
 	u32 nverts;           ///< Number of vertices
 	u32 nindices;         ///< Number of indices
 	u32 indices_per_prim; ///< Number of indices that make up one primitive
-	const std::vector<size_t>* drawlist; ///< For reducing barriers on sprites
+	const u32* drawlist; ///< For reducing barriers on sprites: a sprite count a run, drawlist_count runs
+	u32 drawlist_count;
 	GSVector4i scissor; ///< Scissor rect
 	GSVector4i drawarea; ///< Area in the framebuffer which will be modified.
 	Topology topology;  ///< Draw topology
@@ -827,6 +826,7 @@ public:
 		bool dual_source_blend    : 1; ///< Supports a second fragment output (SRC1) as a hardware blend factor.
 		bool colclip_hw           : 1; ///< Has a render target format that holds a 16-bit integer per channel exactly, for the colour clip accumulation.
 		bool indexed4_conversion  : 1; ///< ConvertToIndexedTexture also builds a PSMT4 view of a PSMCT32 target.
+		bool texture_feedback     : 1; ///< A draw can sample its render target anywhere, a texture barrier making the writes before it visible.
 		FeatureSupport()
 		{
 			memset(this, 0, sizeof(*this));
@@ -845,12 +845,6 @@ public:
 		GSHWDrawConfig::ColorMaskSelector wmask; // 0xf for all channels by default
 	};
 
-	struct TextureRecycleDeleter
-	{
-		void operator()(GSTexture* const tex);
-	};
-	using RecycledTexture = std::unique_ptr<GSTexture, TextureRecycleDeleter>;
-
 	enum BlendFactor : u8
 	{
 		// HW blend factors
@@ -867,7 +861,7 @@ public:
 	// clang-format on
 
 private:
-	std::array<FastList<GSTexture*>, 2> m_pool; // [texture, target]
+	FastList<GSTexture*> m_pool[2]; // [texture, target]
 
 	static const HWBlend m_blendMap[81];
 
@@ -1045,7 +1039,8 @@ public:
 	GSTexture* CreateDepthStencil(int w, int h, GSTexture::Format format, bool clear = true);
 	GSTexture* CreateTexture(int w, int h, int mipmap_levels, GSTexture::Format format, bool prefer_reuse = false);
 
-	GSDownloadTexturePtr CreateDownloadTexture(u32 width, u32 height, GSTexture::Format format);
+	/* A new download texture, or NULL; freed with gs_download_texture_free. */
+	GSDownloadTexture* CreateDownloadTexture(u32 width, u32 height, GSTexture::Format format);
 
 	void CopyRect(GSTexture* sTex, GSTexture* dTex, const GSVector4i& r, u32 destX, u32 destY);
 	void StretchRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect, ShaderConvert shader = ShaderConvert::COPY, bool linear = true);
@@ -1064,7 +1059,7 @@ public:
 	static void SortMultiStretchRects(MultiStretchRect* rects, u32 num_rects);
 
 	/// Updates a GPU CLUT texture from a source texture.
-	void UpdateCLUTTexture(GSTexture* sTex, float sScale, u32 offsetX, u32 offsetY, GSTexture* dTex, u32 dOffset, u32 dSize, u32 samples);
+	void UpdateCLUTTexture(GSTexture* sTex, float sScale, float sSample, u32 offsetX, u32 offsetY, GSTexture* dTex, u32 dOffset, u32 dSize);
 
 	/// Converts a colour format to an indexed format texture. offsetX/offsetY
 	/// are page-aligned, unscaled pixel offsets into the source target.
@@ -1164,8 +1159,6 @@ public:
 	__ri static u16 GetBlendFlags(u32 index) { return m_blendMap[index].flags; }
 };
 
-template <>
-struct std::hash<GSHWDrawConfig::PSSelector> : public GSHWDrawConfig::PSSelectorHash {};
 
 /* The open device, or NULL. A plain pointer: a device is disposed of with
  * Free(), through its table, since its destructor is not virtual. */
@@ -1197,7 +1190,7 @@ struct gs_device_ops
 	void       (*stretch_rect_mask)(GSDevice* dev, GSTexture* sTex, const GSVector4* sRect, GSTexture* dTex, const GSVector4* dRect, bool red, bool green, bool blue, bool alpha, ShaderConvert shader);
 	void       (*present_rect)(GSDevice* dev, GSTexture* sTex, const GSVector4* sRect, GSTexture* dTex, const GSVector4* dRect);
 	void       (*draw_multi_stretch_rects)(GSDevice* dev, const GSDevice::MultiStretchRect* rects, u32 num_rects, GSTexture* dTex, ShaderConvert shader);
-	void       (*update_clut_texture)(GSDevice* dev, GSTexture* sTex, float sScale, u32 offsetX, u32 offsetY, GSTexture* dTex, u32 dOffset, u32 dSize, u32 samples);
+	void       (*update_clut_texture)(GSDevice* dev, GSTexture* sTex, float sScale, float sSample, u32 offsetX, u32 offsetY, GSTexture* dTex, u32 dOffset, u32 dSize);
 	void       (*convert_to_indexed_texture)(GSDevice* dev, GSTexture* sTex, float sScale, u32 offsetX, u32 offsetY, u32 SBW, u32 SPSM, GSTexture* dTex, u32 DBW, u32 DPSM);
 	void       (*filtered_downsample_texture)(GSDevice* dev, GSTexture* sTex, GSTexture* dTex, u32 downsample_factor, const GSVector2i* clamp_min, const GSVector4* dRect);
 	void       (*move_texels)(GSDevice* dev, GSTexture* sTex, GSTexture* dTex, const GSVector4* dRect, const MoveTexelsConstants* cb);
@@ -1220,8 +1213,8 @@ __forceinline_odr GSDevice::PresentResult GSDevice::BeginPresent(bool frame_skip
 __forceinline_odr void GSDevice::EndPresent()          { GS_DEVICE_CALL(end_present); }
 __forceinline_odr GSTexture* GSDevice::CreateSurface(GSTexture::Type type, int width, int height, int levels, GSTexture::Format format)
 { return GS_DEVICE_CALL(create_surface, type, width, height, levels, format); }
-__forceinline_odr GSDownloadTexturePtr GSDevice::CreateDownloadTexture(u32 width, u32 height, GSTexture::Format format)
-{ return GSDownloadTexturePtr(GS_DEVICE_CALL(create_download_texture, width, height, format)); }
+__forceinline_odr GSDownloadTexture* GSDevice::CreateDownloadTexture(u32 width, u32 height, GSTexture::Format format)
+{ return GS_DEVICE_CALL(create_download_texture, width, height, format); }
 __forceinline_odr void GSDevice::DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, GSVector4* dRect, const GSRegPMODE& PMODE, const GSRegEXTBUF& EXTBUF, u32 c, const bool linear)
 { GS_DEVICE_CALL(do_merge, sTex, sRect, dTex, dRect, &PMODE, &EXTBUF, c, linear); }
 __forceinline_odr void GSDevice::DoInterlace(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect, ShaderInterlace shader, bool linear, const InterlaceConstantBuffer& cb)
@@ -1241,8 +1234,8 @@ __forceinline_odr void GSDevice::DrawMultiStretchRects(const MultiStretchRect* r
 	else
 		DrawMultiStretchRectsBase(rects, num_rects, dTex, shader);
 }
-__forceinline_odr void GSDevice::UpdateCLUTTexture(GSTexture* sTex, float sScale, u32 offsetX, u32 offsetY, GSTexture* dTex, u32 dOffset, u32 dSize, u32 samples)
-{ GS_DEVICE_CALL(update_clut_texture, sTex, sScale, offsetX, offsetY, dTex, dOffset, dSize, samples); }
+__forceinline_odr void GSDevice::UpdateCLUTTexture(GSTexture* sTex, float sScale, float sSample, u32 offsetX, u32 offsetY, GSTexture* dTex, u32 dOffset, u32 dSize)
+{ GS_DEVICE_CALL(update_clut_texture, sTex, sScale, sSample, offsetX, offsetY, dTex, dOffset, dSize); }
 __forceinline_odr void GSDevice::ConvertToIndexedTexture(GSTexture* sTex, float sScale, u32 offsetX, u32 offsetY, u32 SBW, u32 SPSM, GSTexture* dTex, u32 DBW, u32 DPSM)
 { GS_DEVICE_CALL(convert_to_indexed_texture, sTex, sScale, offsetX, offsetY, SBW, SPSM, dTex, DBW, DPSM); }
 __forceinline_odr void GSDevice::FilteredDownsampleTexture(GSTexture* sTex, GSTexture* dTex, u32 downsample_factor, const GSVector2i& clamp_min, const GSVector4& dRect)
@@ -1274,7 +1267,7 @@ struct klass##_ops_access { \
 	static int        tag##_begin_present(GSDevice* d, bool frame_skip) { return static_cast<int>(static_cast<klass*>(d)->BeginPresent(frame_skip)); } \
 	static void       tag##_end_present(GSDevice* d) { static_cast<klass*>(d)->EndPresent(); } \
 	static GSTexture* tag##_create_surface(GSDevice* d, GSTexture::Type type, int w, int h, int levels, GSTexture::Format format) { return static_cast<klass*>(d)->CreateSurface(type, w, h, levels, format); } \
-	static GSDownloadTexture* tag##_create_download_texture(GSDevice* d, u32 w, u32 h, GSTexture::Format format) { return static_cast<klass*>(d)->CreateDownloadTexture(w, h, format).release(); } \
+	static GSDownloadTexture* tag##_create_download_texture(GSDevice* d, u32 w, u32 h, GSTexture::Format format) { return static_cast<klass*>(d)->CreateDownloadTexture(w, h, format); } \
 	static void       tag##_do_merge(GSDevice* d, GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, GSVector4* dRect, const GSRegPMODE* PMODE, const GSRegEXTBUF* EXTBUF, u32 c, bool linear) { static_cast<klass*>(d)->DoMerge(sTex, sRect, dTex, dRect, *PMODE, *EXTBUF, c, linear); } \
 	static void       tag##_do_interlace(GSDevice* d, GSTexture* sTex, const GSVector4* sRect, GSTexture* dTex, const GSVector4* dRect, ShaderInterlace shader, bool linear, const InterlaceConstantBuffer* cb) { static_cast<klass*>(d)->DoInterlace(sTex, *sRect, dTex, *dRect, shader, linear, *cb); } \
 	static void       tag##_copy_rect(GSDevice* d, GSTexture* sTex, GSTexture* dTex, const GSVector4i* r, u32 destX, u32 destY) { static_cast<klass*>(d)->CopyRect(sTex, dTex, *r, destX, destY); } \
@@ -1282,7 +1275,7 @@ struct klass##_ops_access { \
 	static void       tag##_stretch_rect_mask(GSDevice* d, GSTexture* sTex, const GSVector4* sRect, GSTexture* dTex, const GSVector4* dRect, bool red, bool green, bool blue, bool alpha, ShaderConvert shader) { static_cast<klass*>(d)->StretchRect(sTex, *sRect, dTex, *dRect, red, green, blue, alpha, shader); } \
 	static void       tag##_present_rect(GSDevice* d, GSTexture* sTex, const GSVector4* sRect, GSTexture* dTex, const GSVector4* dRect) { static_cast<klass*>(d)->PresentRect(sTex, *sRect, dTex, *dRect); } \
 	static void       tag##_draw_multi_stretch_rects(GSDevice* d, const GSDevice::MultiStretchRect* rects, u32 num_rects, GSTexture* dTex, ShaderConvert shader) { static_cast<klass*>(d)->DrawMultiStretchRects(rects, num_rects, dTex, shader); } \
-	static void       tag##_update_clut_texture(GSDevice* d, GSTexture* sTex, float sScale, u32 offsetX, u32 offsetY, GSTexture* dTex, u32 dOffset, u32 dSize, u32 samples) { static_cast<klass*>(d)->UpdateCLUTTexture(sTex, sScale, offsetX, offsetY, dTex, dOffset, dSize, samples); } \
+	static void       tag##_update_clut_texture(GSDevice* d, GSTexture* sTex, float sScale, float sSample, u32 offsetX, u32 offsetY, GSTexture* dTex, u32 dOffset, u32 dSize) { static_cast<klass*>(d)->UpdateCLUTTexture(sTex, sScale, sSample, offsetX, offsetY, dTex, dOffset, dSize); } \
 	static void       tag##_convert_to_indexed_texture(GSDevice* d, GSTexture* sTex, float sScale, u32 offsetX, u32 offsetY, u32 SBW, u32 SPSM, GSTexture* dTex, u32 DBW, u32 DPSM) { static_cast<klass*>(d)->ConvertToIndexedTexture(sTex, sScale, offsetX, offsetY, SBW, SPSM, dTex, DBW, DPSM); } \
 	static void       tag##_filtered_downsample_texture(GSDevice* d, GSTexture* sTex, GSTexture* dTex, u32 factor, const GSVector2i* clamp_min, const GSVector4* dRect) { static_cast<klass*>(d)->FilteredDownsampleTexture(sTex, dTex, factor, *clamp_min, *dRect); } \
 	static void       tag##_move_texels(GSDevice* d, GSTexture* sTex, GSTexture* dTex, const GSVector4* dRect, const MoveTexelsConstants* cb) { static_cast<klass*>(d)->MoveTexels(sTex, dTex, *dRect, *cb); } \

@@ -68,10 +68,16 @@ const uptr* psxMemRLUT = s_rlut;
 
 /* The loader's other surface; none of it is entered from a string. */
 extern "C" int path_is_directory(const char*) { return 0; }
-#include "HostFS.h"
-namespace FileSystem {
-	bool FindFiles(const char*, const char*, unsigned,
-	               std::vector<FILESYSTEM_FIND_DATA>*) { return false; }
+struct RDIR;
+extern "C" {
+	struct RDIR* retro_opendir_include_hidden(const char*, bool) { return 0; }
+	bool retro_dirent_error(struct RDIR*) { return true; }
+	int  retro_readdir(struct RDIR*) { return 0; }
+	const char* retro_dirent_get_name(struct RDIR*) { return ""; }
+	bool retro_dirent_is_dir(struct RDIR*, const char*) { return false; }
+	void retro_closedir(struct RDIR*) { }
+	int  rl_fnmatch(const char*, const char*, int) { return 1; }
+	int64_t path_get_size(const char*) { return -1; }
 }
 extern "C" int64_t filestream_read_file(const char*, void**, int64_t*) { return 0; }
 extern "C" {
@@ -107,7 +113,6 @@ static void test_log(enum retro_log_level level, const char* fmt, ...)
 }
 extern "C" retro_log_printf_t log_cb = test_log;
 
-extern std::vector<IniPatch> Patch;
 
 int main(int argc, char** argv)
 {
@@ -155,13 +160,14 @@ int main(int argc, char** argv)
 		/* Applying them all is what proves a bytes payload survived the
 		 * parse: a line that loaded but kept an empty payload writes
 		 * nothing. */
-		for (i = 0; i < Patch.size(); i++)
+		for (i = 0; i < LoadedPatchCount(); i++)
 		{
-			_ApplyPatch(&Patch[i]);
-			if (Patch[i].type == 9 /* BYTES_T */ && Patch[i].bytes.empty())
+			IniPatch* ip = LoadedPatch(i);
+			_ApplyPatch(ip);
+			if (ip->type == 9 /* BYTES_T */ && (!ip->bytes || !ip->nbytes))
 			{
 				printf("  a bytes patch at %08x parsed with no payload\n",
-				       Patch[i].addr);
+				       ip->addr);
 				g_errors++;
 			}
 			applied++;
@@ -177,6 +183,84 @@ int main(int argc, char** argv)
 		printf("dbparse: %d/%d game database patch lines accepted\n",
 		       loaded, file_lines);
 		(void)applied;
+	}
+
+	/* Lines the database does not have but a pnach can: spacing around
+	 * the '=' and the commas, a trailing comment, a line with no '=', a
+	 * place out of range, a bytes payload that is not hex or not whole
+	 * bytes, and numbers past their field. Each says whether it loads and,
+	 * when it does, what it loads as. */
+	{
+		static const struct
+		{
+			const char* line;
+			int loads;
+			int place;
+			u32 addr;
+			u64 data;
+			const char* bytes; /* hex of the payload, for a bytes line */
+		} cases[] = {
+			{"patch=1,EE,00100000,word,0000002A", 1, 1, 0x00100000u, 0x2Au, nullptr},
+			{"  patch = 0 , EE , 2010abcd , word , DEADBEEF   // note", 1, 0, 0x2010abcdu, 0xDEADBEEFu, nullptr},
+			{"patch=2,IOP,0001ffff,byte,ff", 1, 2, 0x0001ffffu, 0xffu, nullptr},
+			{"patch=1,EE,00100000,double,123456789abcdef0", 1, 1, 0x00100000u, 0x123456789abcdef0ull, nullptr},
+			{"patch=1,EE,00100000,bytes,00a1FF7e", 1, 1, 0x00100000u, 0, "00a1ff7e"},
+			{"patch 1,EE,00100000,word,1", 0, 0, 0, 0, nullptr},
+			{"// patch=1,EE,00100000,word,1", 0, 0, 0, 0, nullptr},
+			{"patch=", 0, 0, 0, 0, nullptr},
+			{"patch=3,EE,00100000,word,1", 0, 0, 0, 0, nullptr},
+			{"patch=x,EE,00100000,word,1", 0, 0, 0, 0, nullptr},
+			{"patch=-1,EE,00100000,word,1", 0, 0, 0, 0, nullptr},
+			{"patch=1,EE,00100000,bytes,0g", 0, 0, 0, 0, nullptr},
+			{"patch=1,EE,00100000,bytes,abc", 0, 0, 0, 0, nullptr},
+			{"patch=1,ARM,00100000,word,1", 0, 0, 0, 0, nullptr},
+			{"patch=1,EE,00100000,dword,1", 0, 0, 0, 0, nullptr},
+			{"patch=1,EE,00100000,word", 0, 0, 0, 0, nullptr},
+			/* An address past 32 bits is no address, so zero, as before. */
+			{"patch=1,EE,100000000,word,1", 1, 1, 0, 1, nullptr},
+			/* A value past 64 bits likewise. */
+			{"patch=1,EE,00100000,word,10000000000000000", 1, 1, 0x00100000u, 0, nullptr},
+		};
+		const int db_errors = g_errors;
+		int case_fails = 0;
+		g_shown = 5; /* the refusals below are expected; do not print them */
+		size_t c;
+		for (c = 0; c < sizeof(cases) / sizeof(cases[0]); c++)
+		{
+			int loaded;
+			bool ok;
+			ForgetLoadedPatches();
+			loaded = LoadPatchesFromString(cases[c].line);
+			ok = (loaded == cases[c].loads) && (LoadedPatchCount() == (size_t)cases[c].loads);
+			if (ok && cases[c].loads)
+			{
+				const IniPatch& ip = *LoadedPatch(0);
+				ok = ip.placetopatch == cases[c].place && ip.addr == cases[c].addr
+					&& ip.data == cases[c].data;
+				if (ok && cases[c].bytes)
+				{
+					char hex[64] = "";
+					size_t b;
+					for (b = 0; b < ip.nbytes && b * 2 + 2 < sizeof(hex); b++)
+						snprintf(hex + b * 2, 3, "%02x", ip.bytes[b]);
+					ok = strcmp(hex, cases[c].bytes) == 0;
+				}
+			}
+			if (!ok)
+			{
+				printf("  FAIL: \"%s\" loaded %d (want %d)", cases[c].line, loaded, cases[c].loads);
+				if (LoadedPatchCount())
+					printf(": place %d addr %08x data %llx", LoadedPatch(0)->placetopatch,
+						LoadedPatch(0)->addr, (unsigned long long)LoadedPatch(0)->data);
+				printf("\n");
+				case_fails++;
+			}
+		}
+		ForgetLoadedPatches();
+		g_errors = db_errors + case_fails;
+		printf("dbparse: %d of %d pnach edge cases as expected\n",
+			(int)(sizeof(cases) / sizeof(cases[0])) - case_fails,
+			(int)(sizeof(cases) / sizeof(cases[0])));
 	}
 
 	return (g_errors != 0 || file_lines == 0);

@@ -13,10 +13,8 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <algorithm>
-#include <type_traits>
 #include "common/Pcsx2Defs.h"
-#include <cmath>
+#include <math.h>
 
 #include "common/Align.h"
 
@@ -131,7 +129,7 @@ void GSDevice::GenerateExpansionIndexBuffer(void* buffer)
 
 int GSDevice::GetMipmapLevelsForSize(int width, int height)
 {
-	return pcsx2_min_i(static_cast<int>(std::log2(pcsx2_max_i(width, height))) + 1, MAXIMUM_TEXTURE_MIPMAP_LEVELS);
+	return pcsx2_min_i(static_cast<int>(log2(static_cast<double>(pcsx2_max_i(width, height)))) + 1, MAXIMUM_TEXTURE_MIPMAP_LEVELS);
 }
 
 bool GSDevice::CreateBase()
@@ -235,8 +233,7 @@ void GSDevice::DestroyBase()
 
 void GSDevice::AcquireWindow(void)
 {
-	std::optional<WindowInfo> wi = Host::AcquireRenderWindow();
-	m_window_info = std::move(wi.value());
+	m_window_info = Host::AcquireRenderWindow();
 }
 
 void GSDevice::ClearRenderTarget(GSTexture* t, u32 c)
@@ -252,11 +249,6 @@ void GSDevice::ClearDepth(GSTexture* t, float d)
 void GSDevice::InvalidateRenderTarget(GSTexture* t)
 {
 	t->SetState(GSTexture::State::Invalidated);
-}
-
-void GSDevice::TextureRecycleDeleter::operator()(GSTexture* const tex)
-{
-	g_gs_device->Recycle(tex);
 }
 
 GSTexture* GSDevice::FetchSurface(GSTexture::Type type, int width, int height, int levels, GSTexture::Format format, bool clear, bool prefer_reuse)
@@ -437,7 +429,7 @@ void GSDevice::AgePool()
 	 * So in steady state nothing is created and nothing is destroyed, on
 	 * every backend: this is GSDevice, above D3D11, D3D12, OpenGL, Vulkan
 	 * and the software renderer alike. */
-	for (u32 pool_idx = 0; pool_idx < m_pool.size(); pool_idx++)
+	for (u32 pool_idx = 0; pool_idx < 2; pool_idx++)
 	{
 		const u32 max_size = (pool_idx == 0) ? MAX_POOLED_TEXTURES : MAX_POOLED_TARGETS;
 		const u64 max_bytes = PoolByteBudget(pool_idx);
@@ -522,7 +514,7 @@ static int multi_stretch_rect_same(const void* a, const void* b)
  * in memory (GSStableGroup.h). */
 void GSDevice::SortMultiStretchRects(MultiStretchRect* rects, u32 num_rects)
 {
-	static_assert(std::is_trivially_copyable<MultiStretchRect>::value,
+	static_assert(__is_trivially_copyable(MultiStretchRect),
 		"gs_stable_group moves the rects bytewise");
 	gs_stable_group(rects, num_rects, sizeof(*rects), multi_stretch_rect_same);
 }
@@ -742,6 +734,16 @@ void GSDevice::Interlace(const GSVector2i& ds, int field, int mode, float yoffse
 	if (!half_fields)
 		block = -block;
 	static int bufIdx = 0;
+
+	/* No merge (its target could not be made): nothing to deinterlace,
+	 * and the frame is skipped. A target of the deinterlacer's that could
+	 * not be made below shows the merge as it is instead: drawing into it
+	 * was a null texture's size read and the core's end. */
+	if (!m_merge)
+	{
+		m_current = nullptr;
+		return;
+	}
 	float offset = yoffset * static_cast<float>(field);
 	offset = GSConfig.DisableInterlaceOffset ? 0.0f : offset;
 
@@ -785,7 +787,11 @@ void GSDevice::Interlace(const GSVector2i& ds, int field, int mode, float yoffse
 			 * the one it replaces is the next merge target. */
 			GSTexture* const other = m_weave_field[field ^ 1];
 			GSTexture* const next  = m_weave_field[field];
-			ResizeRenderTarget(&m_weavebob, ds.x, ds.y, false, false, true);
+			if (!ResizeRenderTarget(&m_weavebob, ds.x, ds.y, false, false, true))
+			{
+				m_current = m_merge;
+				break;
+			}
 			if (!other)
 				ClearRenderTarget(m_weavebob, 0);
 			do_interlace(m_merge, m_weavebob, ShaderInterlace::WEAVE, true, offset, field);
@@ -806,7 +812,11 @@ void GSDevice::Interlace(const GSVector2i& ds, int field, int mode, float yoffse
 			const float bob_offset = yoffset * (1 - field);
 			GSTexture* const other = m_weave_field[field ^ 1];
 			GSTexture* const next  = m_weave_field[field];
-			ResizeRenderTarget(&m_weavebob, ds.x, ds.y, false, false, true);
+			if (!ResizeRenderTarget(&m_weavebob, ds.x, ds.y, false, false, true))
+			{
+				m_current = m_merge;
+				break;
+			}
 			if (bob_offset > 0.0f && other)
 				StretchRect(other, GSVector4(0.0f, 0.0f, 1.0f, bob_offset / static_cast<float>(ds.y)), m_weavebob,
 					GSVector4(0.0f, 0.0f, static_cast<float>(ds.x), bob_offset), ShaderConvert::COPY, true);
@@ -819,9 +829,13 @@ void GSDevice::Interlace(const GSVector2i& ds, int field, int mode, float yoffse
 			break;
 		}
 		case 2: // Blend
-			ResizeRenderTarget(&m_weavebob, ds.x, ds.y, true, false, true);
+			if (!ResizeRenderTarget(&m_weavebob, ds.x, ds.y, true, false, true)
+				|| !ResizeRenderTarget(&m_blend, ds.x, ds.y, false, false, true))
+			{
+				m_current = m_merge;
+				break;
+			}
 			do_interlace(m_merge, m_weavebob, ShaderInterlace::WEAVE, true, offset, field);
-			ResizeRenderTarget(&m_blend, ds.x, ds.y, false, false, true);
 			do_interlace(m_weavebob, m_blend, ShaderInterlace::BLEND, false, 0, 0);
 			m_current = m_blend;
 			break;
@@ -830,7 +844,12 @@ void GSDevice::Interlace(const GSVector2i& ds, int field, int mode, float yoffse
 			bufIdx &= ~1;
 			bufIdx |= field;
 			bufIdx &= 3;
-			ResizeRenderTarget(&m_mad, ds.x, ds.y * 2.0f, true, false, true);
+			if (!ResizeRenderTarget(&m_mad, ds.x, ds.y * 2.0f, true, false, true)
+				|| !ResizeRenderTarget(&m_weavebob, ds.x, ds.y, false, false, true))
+			{
+				m_current = m_merge;
+				break;
+			}
 			if (half_fields)
 			{
 				/* The last four fields, each whole at its own height (the merge
@@ -843,13 +862,11 @@ void GSDevice::Interlace(const GSVector2i& ds, int field, int mode, float yoffse
 				const GSVector4 dRect = GSVector4(0.0f, slot_h * static_cast<float>(bufIdx), static_cast<float>(mad_size.x), slot_h * static_cast<float>(bufIdx + 1));
 				const InterlaceConstantBuffer cb = {GSVector4(static_cast<float>(bufIdx), 0.0f, 0.0f, block)};
 				DoInterlace(m_merge, sRect, m_mad, dRect, ShaderInterlace::BOB, true, cb);
-				ResizeRenderTarget(&m_weavebob, ds.x, ds.y, false, false, true);
 				do_interlace(m_mad, m_weavebob, ShaderInterlace::MAD_RECONSTRUCT, true, 0, bufIdx);
 			}
 			else
 			{
 				do_interlace(m_merge, m_mad, ShaderInterlace::MAD_BUFFER, true, offset, bufIdx);
-				ResizeRenderTarget(&m_weavebob, ds.x, ds.y, false, false, true);
 				do_interlace(m_mad, m_weavebob, ShaderInterlace::MAD_RECONSTRUCT, false, 0, bufIdx);
 			}
 			m_current = m_weavebob;
