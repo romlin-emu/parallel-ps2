@@ -46,7 +46,7 @@ jobs:
       - name: Install what the suites build against
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential python3 liblzma-dev zlib1g-dev libgl-dev libegl1 libgl1-mesa-dri qemu-utils mame-tools cmake clang libc++-dev libc++abi-dev
+          sudo apt-get install -y build-essential python3 liblzma-dev zlib1g-dev libgl-dev libegl1 libgl1-mesa-dri qemu-utils mame-tools cmake clang libc++-dev libc++abi-dev glslc
 
       - name: Check suite runner behavior
         run: python3 tests/ci/check.py
