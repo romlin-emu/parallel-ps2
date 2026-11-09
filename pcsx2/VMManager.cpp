@@ -819,7 +819,7 @@ void VMManager::Shutdown()
 	FPControlRegister::SetCurrent(FPControlRegister::GetDefault());
 
 	ForgetLoadedPatches();
-	R3000A::ioman::reset();
+	irxIomanReset();
 	vtlb_Shutdown();
 	USBclose();
 	SPU2_Close();
