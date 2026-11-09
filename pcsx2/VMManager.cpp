@@ -50,6 +50,7 @@
 #include "MemoryCardFile.h"
 #include "Patch.h"
 #include "PerformanceMetrics.h"
+#include "Gif_Unit.h"
 #include "SaveState.h"
 #include "R3000A.h"
 #include "VUmicro.h"
@@ -244,6 +245,10 @@ void VMManager::Internal::UpdateEmuFolders()
 
 void VMManager::Internal::CPUThreadInitialize(void)
 {
+	/* The GIF paths' packet buffers, before anything that could reach
+	 * them. */
+	if (!gif_unit_init())
+		log_cb(RETRO_LOG_ERROR, "Failed to allocate the GIF path buffers.\n");
 	GSinit();
 	SPU2_Initialize();
 	USBinit();
@@ -264,6 +269,8 @@ void VMManager::Internal::CPUThreadShutdown(void)
 
 	ShutdownCPUProviders();
 	sys_memory_destroy(&s_vm_memory);
+	/* After the VU1 worker, the last of the paths' users, has gone. */
+	gif_unit_shutdown();
 
 	/* Nothing consults the game database without a VM, and the next
 	 * load re-reads it lazily. */
@@ -1336,7 +1343,7 @@ static void SetMTVUAndAffinityControlDefault(Pcsx2Config& c)
 	// VU1 program (an endless microprogram streaming XGKICK packets, e.g. GT3's
 	// arcade attract) deadlock the one-packet-per-program MTVU handoff with the
 	// VU1 INTERPRETER: the worker drip-feeds gsPack mid-program until path1's
-	// 9MB buffer fills (CopyGSPacketData -> WaitGS(true) with an empty
+	// 9MB buffer fills (gif_path_copy -> WaitGS(true) with an empty
 	// gsPackQueue), while MTGS sits in semaXGkick.Wait() for a program end that
 	// never comes. Needs a partial-packet flush protocol (or a VU recompiler
 	// with upstream's XGKICK handling) -- until C.28-4 MTVU was opt-in
