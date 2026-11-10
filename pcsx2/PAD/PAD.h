@@ -120,10 +120,6 @@ namespace Input
 	void ResetSelection();
 }
 
-/* The input Input::Update staged becomes what the pads report. Only
- * while the EE is held: see PAD.cpp. */
-extern "C" void pad_input_latch(void);
-
 s32 PADinit();
 void PADshutdown();
 s32 PADopen();

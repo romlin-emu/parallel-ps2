@@ -43,6 +43,7 @@
 #include "GameDatabase.h"
 #include "GS.h"
 #include "GS/Renderers/HW/GSTextureReplacements.h"
+#include "GS/GS.h"
 #include "Host.h"
 #include "IopBios.h"
 #include "MTVU.h"
@@ -532,7 +533,7 @@ void VMManager::LoadPatches(const std::string& serial, u32 crc)
 			if (EmuConfig.GS.InterlaceMode == GSInterlaceMode::Automatic)
 			{
 				EmuConfig.GS.InterlaceMode = GSInterlaceMode::Off;
-				MTGS::ApplySettings();
+				mtgs_apply_settings();
 			}
 		}
 	}
@@ -597,7 +598,7 @@ void VMManager::UpdateRunningGame(bool resetting, bool game_starting, bool swapp
 			ReloadPatches();
 	}
 
-	MTGS::GameChanged();
+	GSGameChanged();
 	Host::OnGameChanged(s_disc_path, s_elf_override, s_game_serial, s_game_crc);
 }
 
@@ -813,7 +814,7 @@ void VMManager::Shutdown()
 	// sync everything
 	if (THREAD_VU1)
 		mtvu_wait_vu();
-	MTGS::WaitGS(false);
+	mtgs_wait_gs(false);
 
 	{
 		LastELF[0] = '\0';
@@ -860,7 +861,7 @@ void VMManager::Shutdown()
 	FWclose();
 	FileMcd_EmuClose();
 
-	MTGS::WaitForClose();
+	mtgs_wait_for_close();
 
 	PADshutdown();
 	DEV9shutdown();
@@ -886,7 +887,7 @@ void VMManager::Reset()
 
 	mtvu_wait_vu();
 	vu1Thread.Reset();
-	MTGS::WaitGS(false);
+	mtgs_wait_gs(false);
 
 	const bool game_was_started = g_GameStarted;
 
@@ -1172,7 +1173,7 @@ void VMManager::CheckForGSConfigChanges(const Pcsx2Config& old_config)
 	if (EmuConfig.GS == old_config.GS)
 		return;
 	UpdateVSyncRate(true);
-	MTGS::ApplySettings();
+	mtgs_apply_settings();
 }
 
 void VMManager::CheckForPatchConfigChanges(const Pcsx2Config& old_config)
@@ -1265,7 +1266,7 @@ void VMManager::ApplySettings()
 	{
 		if (THREAD_VU1)
 			mtvu_wait_vu();
-		MTGS::WaitGS(false);
+		mtgs_wait_gs(false);
 	}
 
 	/* LoadSettings builds the config afresh from the options and the
@@ -1404,7 +1405,7 @@ static void SetMTVUAndAffinityControlDefault(Pcsx2Config& c) { (void)c; }
  * are not that (a 2-core/4-thread part used to pass on its thread count
  * and put the three on two cores); every writer of EmuCore/Speedhacks
  * vuThread must apply this same predicate, otherwise THREAD_VU1 can come
- * up true with no worker alive and MTGS::MainLoop waits on a handoff
+ * up true with no worker alive and mtgs_main_loop waits on a handoff
  * that never arrives (boot hang). */
 bool VMManager::MtvuHardwareAllowed()
 {
