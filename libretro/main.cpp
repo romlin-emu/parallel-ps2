@@ -1880,8 +1880,7 @@ void retro_deinit(void)
 		log_cb(RETRO_LOG_WARN, "%u audio samples dropped: the frontend stopped taking audio\n",
 			(unsigned)audio_queue_dropped);
 	audio_queue_free();
-	// WIN32 doesn't allow canceling threads from global constructors/destructors in a shared library.
-	vu1Thread.Close();
+	mtvu_shutdown();
 }
 
 void retro_get_system_info(retro_system_info* info)
@@ -2384,7 +2383,8 @@ void retro_init(void)
 	else
 		log_cb = fallback_log;
 
-	vu1Thread.Reset();
+	mtvu_init();
+	mtvu_reset();
 
 	if (setting_bios.empty())
 	{
@@ -3032,7 +3032,7 @@ bool retro_load_game(const struct retro_game_info* game)
 	/* sthread_create_with_stack_size rather than a default thread for one
 	 * substantive reason: the stack size.  This thread runs microVU0 always
 	 * and microVU1 whenever MTVU is off - the exact code
-	 * EMU_THREAD_STACK_SIZE exists for ("uVU likes recursion") and that
+	 * VM_EMU_THREAD_STACK_SIZE exists for ("uVU likes recursion") and that
 	 * the MTVU worker already requests - while the Windows default for
 	 * an unadorned thread is half that. */
 	retro_atomic_store_release_int(&cpu_thread_boot_result, 0);
@@ -3048,7 +3048,7 @@ bool retro_load_game(const struct retro_game_info* game)
 	}
 	cpu_thread_boot_params = boot_params;
 	cpu_thread = sthread_create_with_stack_size(cpu_thread_entry_trampoline, NULL,
-			VMManager::EMU_THREAD_STACK_SIZE);
+			VM_EMU_THREAD_STACK_SIZE);
 	/* The EE pins itself during Initialize; the handle is for pins made
 	 * from this thread later, with the EE paused. */
 	VMManager::SetVMThread(cpu_thread);
