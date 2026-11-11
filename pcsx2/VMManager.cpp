@@ -198,6 +198,11 @@ bool VMManager::HasValidVM()
 	return (state >= VMState::Running && state <= VMState::Resetting);
 }
 
+const char* VMManager::GetDiscSerial()
+{
+	return s_game_serial;
+}
+
 void VMManager::Internal::UpdateEmuFolders()
 {
 	const std::string old_cheats_directory(EmuFolders::Cheats);

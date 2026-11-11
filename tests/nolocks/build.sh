@@ -4,7 +4,8 @@
 # critical section. This fails on any of them in the core's own sources.
 # libretro-common is synced from RetroArch and its primitives are
 # allowed to use what they like underneath. The negative case checks a
-# stray lock is caught.
+# stray lock is caught. The texture replacement loader's worker thread and
+# its caches keep their mutexes (SLockGuard.h, GSTextureReplacements.cpp).
 set -e
 DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(CDPATH= cd -- "$DIR/../.." && pwd)
@@ -14,6 +15,7 @@ PATTERN='\bPGS::(mutex|lock_guard|unique_lock|condition_variable)\b|\bRWSpinLock
 scan() {
 	grep -rnE "$PATTERN" "$@" --include='*.c' --include='*.cpp' --include='*.h' --include='*.hpp' --include='*.inl' \
 		| grep -v '/libretro-common/' \
+		| grep -v -E '/(SLockGuard\.h|GSTextureReplacements\.cpp):' \
 		| grep -v "^$DIR/" || true
 }
 

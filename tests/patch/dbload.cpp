@@ -135,7 +135,7 @@ bool FileMcd_IsMultitapSlot(unsigned) { return false; }
 }
 
 /* Apply one GS hardware fix to a default config, as a game entry would. */
-static Pcsx2Config::GSOptions apply_fix(GameDatabaseSchema::GSHWFixId id, int value)
+static Pcsx2Config::GSOptions apply_fix(int id, int value)
 {
 	GameDatabaseHWFix fix;
 	GameDatabaseEntry entry;
@@ -165,7 +165,6 @@ static void expect(bool ok, const char* what, int value)
  * outside the table must change nothing. */
 static void check_gs_mode_numbering(void)
 {
-	using GameDatabaseSchema::GSHWFixId;
 	static const struct { int value; GSNativeScaling mode; } kScaling[] = {
 		{0, GS_NATIVE_SCALING_OFF}, {1, GS_NATIVE_SCALING_NORMAL}, {2, GS_NATIVE_SCALING_AGGRESSIVE},
 		{3, GS_NATIVE_SCALING_NORMAL_UPSCALED}, {4, GS_NATIVE_SCALING_AGGRESSIVE_UPSCALED},
@@ -180,12 +179,12 @@ static void check_gs_mode_numbering(void)
 
 	for (i = 0; i < sizeof(kScaling) / sizeof(kScaling[0]); i++)
 	{
-		Pcsx2Config::GSOptions gs = apply_fix(GSHWFixId::NativeScaling, kScaling[i].value);
+		Pcsx2Config::GSOptions gs = apply_fix(GAMEDB_HWFIX_NATIVE_SCALING, kScaling[i].value);
 		expect(gs.UserHacks_NativeScaling == kScaling[i].mode, "nativeScaling", kScaling[i].value);
 	}
 	for (i = 0; i < sizeof(kOffset) / sizeof(kOffset[0]); i++)
 	{
-		Pcsx2Config::GSOptions gs = apply_fix(GSHWFixId::HalfPixelOffset, kOffset[i].value);
+		Pcsx2Config::GSOptions gs = apply_fix(GAMEDB_HWFIX_HALF_PIXEL_OFFSET, kOffset[i].value);
 		expect(gs.UserHacks_HalfPixelOffset == kOffset[i].mode, "halfPixelOffset", kOffset[i].value);
 	}
 
@@ -204,7 +203,7 @@ static void check_gs_mode_numbering(void)
 		GameDatabaseHWFix fix;
 		GameDatabaseEntry entry;
 		Pcsx2Config::GSOptions gs;
-		fix.id = GSHWFixId::NativeScaling;
+		fix.id = GAMEDB_HWFIX_NATIVE_SCALING;
 		fix.value = 2;
 		memset(&entry, 0, sizeof(entry));
 		entry.gsHWFixes = &fix;
@@ -220,9 +219,9 @@ static void check_gs_mode_numbering(void)
 		const int before = g_warnings;
 		const int shown = g_shown;
 		g_shown = 8; /* these warnings are expected; keep them off the log */
-		Pcsx2Config::GSOptions a = apply_fix(GSHWFixId::NativeScaling, 5);
-		Pcsx2Config::GSOptions b = apply_fix(GSHWFixId::HalfPixelOffset, 6);
-		Pcsx2Config::GSOptions c = apply_fix(GSHWFixId::NativeScaling, -1);
+		Pcsx2Config::GSOptions a = apply_fix(GAMEDB_HWFIX_NATIVE_SCALING, 5);
+		Pcsx2Config::GSOptions b = apply_fix(GAMEDB_HWFIX_HALF_PIXEL_OFFSET, 6);
+		Pcsx2Config::GSOptions c = apply_fix(GAMEDB_HWFIX_NATIVE_SCALING, -1);
 		expect(a.UserHacks_NativeScaling == defaults.UserHacks_NativeScaling, "nativeScaling", 5);
 		expect(b.UserHacks_HalfPixelOffset == defaults.UserHacks_HalfPixelOffset, "halfPixelOffset", 6);
 		expect(c.UserHacks_NativeScaling == defaults.UserHacks_NativeScaling, "nativeScaling", -1);
@@ -236,9 +235,9 @@ static void check_gs_mode_numbering(void)
  * one the core translates; applying it warns otherwise. */
 static void check_database_modes(void)
 {
-	static const struct { const char* key; GameDatabaseSchema::GSHWFixId id; } kKeys[] = {
-		{"    nativeScaling: ", GameDatabaseSchema::GSHWFixId::NativeScaling},
-		{"    halfPixelOffset: ", GameDatabaseSchema::GSHWFixId::HalfPixelOffset},
+	static const struct { const char* key; int id; } kKeys[] = {
+		{"    nativeScaling: ", GAMEDB_HWFIX_NATIVE_SCALING},
+		{"    halfPixelOffset: ", GAMEDB_HWFIX_HALF_PIXEL_OFFSET},
 	};
 	size_t k;
 	for (k = 0; k < sizeof(kKeys) / sizeof(kKeys[0]); k++)

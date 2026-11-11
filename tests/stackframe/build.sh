@@ -19,7 +19,7 @@ WORK="$DIR/.work"
 rm -rf "$WORK" && mkdir -p "$WORK"
 trap 'rm -rf "$WORK"' EXIT
 
-"$MAKE" --no-print-directory -C "$ROOT" pcsx2/GameDatabaseBuiltin.cpp SANITIZER=
+"$MAKE" --no-print-directory -C "$ROOT" pcsx2/GameDatabaseBuiltin.c SANITIZER=
 
 # Measure release frames, without sanitizer instrumentation inflating them.
 # Each compile command, one script per source, its object sent to WORK.

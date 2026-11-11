@@ -57,6 +57,9 @@ namespace VMManager
 	/// True when this host has enough hardware threads for the MTVU worker.
 	bool MtvuHardwareAllowed();
 
+	/// Returns the serial of the disc/executable currently running.
+	const char* GetDiscSerial();
+
 	/// Loads global settings (i.e. EmuConfig).
 	void LoadSettings();
 

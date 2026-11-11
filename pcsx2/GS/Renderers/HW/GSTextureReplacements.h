@@ -18,6 +18,7 @@
 #include "GSTextureCache.h"
 
 #include <utility> /* std::pair */
+#include <vector>
 
 namespace GSTextureReplacements
 {

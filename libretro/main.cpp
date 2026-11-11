@@ -9,6 +9,7 @@
 #include "state_ext.h"
 
 #include <cstdint>
+#include <cstring>
 #include <libretro.h>
 #include <stdarg.h>
 #include <file/file_path.h>
