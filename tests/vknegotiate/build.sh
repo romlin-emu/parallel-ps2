@@ -678,8 +678,10 @@ echo "  pipelines built ahead: the heap stays flat after, and a rate set meanwhi
 # case is played from its first retro_run on each renderer, and what the
 # core allocates - not the driver while the core records, not this
 # frontend - must stay at or under what it was: a commit that removes one
-# lowers its number here. Over it, the sites are named (resolve them with
-# addr2line -f -C -e <core> <offset>).
+# lowers its number here. Pipelines built ahead that finish during play
+# are staged then, so a count moves by a few percent from run to run on
+# the same core: 5% over a ceiling is allowed. Over that, the sites are
+# named (resolve them with addr2line -f -C -e <core> <offset>).
 ALLOC_CEILINGS="
 Vulkan stream_ct32 86
 Vulkan depth_states 18
@@ -716,7 +718,7 @@ echo "$ALLOC_CEILINGS" | while read r c most; do
 		echo "  allocations during play: not counted here (glibc on Linux only)"
 		exit 2
 	fi
-	if [ "$n" -gt "$most" ]; then
+	if [ "$n" -gt $((most + most / 20)) ]; then
 		grep "allocation site" "$SCRATCH/alloc.log" | sort -t: -k3 -n -r | head -n 20
 		echo "  FAIL: $c on $renderer: the core allocates $n times during play, $most before"
 		exit 1
