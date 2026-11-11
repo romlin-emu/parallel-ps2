@@ -377,7 +377,7 @@ void GSTextureReplacements::ReloadReplacementMap()
 			PrecacheReplacementTextures();
 
 		// log a warning when paltex is on and preloading is off, since we'll be disabling paltex
-		if (GSConfig.GPUPaletteConversion && GSConfig.TexturePreloading != TexturePreloadingLevel::Full)
+		if (GSConfig.GPUPaletteConversion && GSConfig.TexturePreloading != GS_PRELOAD_FULL)
 		{
 			log_cb(RETRO_LOG_WARN, "Replacement textures were found, and GPU palette conversion is enabled without full preloading.\n");
 			log_cb(RETRO_LOG_WARN, "Palette textures will be disabled. Please enable full preloading or disable GPU palette conversion.\n");
@@ -631,7 +631,7 @@ void GSTextureReplacements::PrecacheReplacementTextures()
 
 	// predict whether the requests will come with mipmaps
 	// TODO: This will be wrong for hw mipmap games like Jak.
-	const bool mipmap = (GSConfig.HWMipmapMode >= GSHWMipmapMode::Enabled || GSConfig.TriFilter == TriFiltering::Forced);
+	const bool mipmap = (GSConfig.HWMipmapMode >= GS_MIPMAP_ENABLED || GSConfig.TriFilter == GS_TRIFILTER_FORCED);
 
 	// pretty simple, just go through the filenames and if any aren't cached, cache them
 	for (const auto& it : s_replacement_texture_filenames)

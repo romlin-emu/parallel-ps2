@@ -80,7 +80,7 @@ Pcsx2Config::GSOptions::GSOptions()
 	DisableVertexShaderExpand = false;
 	SkipDuplicateFrames = false;
 
-	HWDownloadMode = GSHardwareDownloadMode::Enabled;
+	HWDownloadMode = GS_DOWNLOAD_ENABLED;
 	GPUPaletteConversion = false;
 	PreloadFrameWithGSData = false;
 	Mipmap = true;
@@ -97,7 +97,7 @@ Pcsx2Config::GSOptions::GSOptions()
 	UserHacks_MergePPSprite = false;
 	UserHacks_ForceEvenSpritePosition = false;
 	UserHacks_NativePaletteDraw = false;
-	UserHacks_Limit24BitDepth = GSLimit24BitDepth::Disabled;
+	UserHacks_Limit24BitDepth = GS_LIMIT24_DISABLED;
 
 	LoadTextureReplacements = false;
 	LoadTextureReplacementsAsync = true;
@@ -175,20 +175,20 @@ void Pcsx2Config::GSOptions::MaskUserHacks()
 	UserHacks_MergePPSprite = false;
 	UserHacks_ForceEvenSpritePosition = false;
 	UserHacks_NativePaletteDraw = false;
-	UserHacks_Limit24BitDepth = GSLimit24BitDepth::Disabled;
+	UserHacks_Limit24BitDepth = GS_LIMIT24_DISABLED;
 	UserHacks_DisableSafeFeatures = false;
 	UserHacks_DisableRenderFixes = false;
-	UserHacks_HalfPixelOffset = GSHalfPixelOffset::Off;
+	UserHacks_HalfPixelOffset = GS_HPO_OFF;
 	UserHacks_RoundSprite = 0;
 	if (!NativeScalingSet)
-		UserHacks_NativeScaling = GSNativeScaling::NativeScaling_Normal;
+		UserHacks_NativeScaling = GS_NATIVE_SCALING_NORMAL;
 	GPUPaletteConversion = false;
 	PreloadFrameWithGSData = false;
 	UserHacks_DisablePartialInvalidation = false;
 	UserHacks_DisableDepthSupport = false;
 	UserHacks_CPUFBConversion = false;
 	UserHacks_ReadTCOnClose = false;
-	UserHacks_TextureInsideRt = GSTextureInRtMode::Disabled;
+	UserHacks_TextureInsideRt = GS_TEXINRT_DISABLED;
 	UserHacks_EstimateTextureRegion = false;
 	UserHacks_TCOffsetX = 0;
 	UserHacks_TCOffsetY = 0;
@@ -208,18 +208,18 @@ void Pcsx2Config::GSOptions::MaskUpscalingHacks()
 	UserHacks_MergePPSprite = false;
 	UserHacks_ForceEvenSpritePosition = false;
 	UserHacks_NativePaletteDraw = false;
-	UserHacks_Limit24BitDepth = GSLimit24BitDepth::Disabled;
-	UserHacks_HalfPixelOffset = GSHalfPixelOffset::Off;
+	UserHacks_Limit24BitDepth = GS_LIMIT24_DISABLED;
+	UserHacks_HalfPixelOffset = GS_HPO_OFF;
 	UserHacks_RoundSprite = 0;
 	if (!NativeScalingSet)
-		UserHacks_NativeScaling = GSNativeScaling::NativeScaling_Normal;
+		UserHacks_NativeScaling = GS_NATIVE_SCALING_NORMAL;
 	UserHacks_TCOffsetX = 0;
 	UserHacks_TCOffsetY = 0;
 }
 
 bool Pcsx2Config::GSOptions::UseHardwareRenderer() const
 {
-	return (Renderer != GSRendererType::SW);
+	return (Renderer != GS_RENDERER_SW);
 }
 
 

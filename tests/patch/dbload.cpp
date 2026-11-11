@@ -167,13 +167,13 @@ static void check_gs_mode_numbering(void)
 {
 	using GameDatabaseSchema::GSHWFixId;
 	static const struct { int value; GSNativeScaling mode; } kScaling[] = {
-		{0, NativeScaling_Off}, {1, NativeScaling_Normal}, {2, NativeScaling_Aggressive},
-		{3, NativeScaling_NormalUpscaled}, {4, NativeScaling_AggressiveUpscaled},
+		{0, GS_NATIVE_SCALING_OFF}, {1, GS_NATIVE_SCALING_NORMAL}, {2, GS_NATIVE_SCALING_AGGRESSIVE},
+		{3, GS_NATIVE_SCALING_NORMAL_UPSCALED}, {4, GS_NATIVE_SCALING_AGGRESSIVE_UPSCALED},
 	};
 	static const struct { int value; GSHalfPixelOffset mode; } kOffset[] = {
-		{0, GSHalfPixelOffset::Off}, {1, GSHalfPixelOffset::Normal},
-		{2, GSHalfPixelOffset::Special}, {3, GSHalfPixelOffset::SpecialAggressive},
-		{4, GSHalfPixelOffset::Native}, {5, GSHalfPixelOffset::NativeWTexOffset},
+		{0, GS_HPO_OFF}, {1, GS_HPO_NORMAL},
+		{2, GS_HPO_SPECIAL}, {3, GS_HPO_SPECIAL_AGGRESSIVE},
+		{4, GS_HPO_NATIVE}, {5, GS_HPO_NATIVE_WTEXOFFSET},
 	};
 	const Pcsx2Config::GSOptions defaults;
 	size_t i;
@@ -191,8 +191,8 @@ static void check_gs_mode_numbering(void)
 
 	/* The two tables cover every mode: none is left without a database value
 	 * to name it (and none is named twice). */
-	expect(sizeof(kScaling) / sizeof(kScaling[0]) == (size_t)NativeScaling_MaxCount, "nativeScaling modes", (int)NativeScaling_MaxCount);
-	expect(sizeof(kOffset) / sizeof(kOffset[0]) == (size_t)GSHalfPixelOffset::MaxCount, "halfPixelOffset modes", (int)GSHalfPixelOffset::MaxCount);
+	expect(sizeof(kScaling) / sizeof(kScaling[0]) == (size_t)GS_NATIVE_SCALING_COUNT, "nativeScaling modes", (int)GS_NATIVE_SCALING_COUNT);
+	expect(sizeof(kOffset) / sizeof(kOffset[0]) == (size_t)GS_HPO_COUNT, "halfPixelOffset modes", (int)GS_HPO_COUNT);
 	for (i = 0; i < sizeof(kScaling) / sizeof(kScaling[0]); i++)
 	{
 		for (size_t j = i + 1; j < sizeof(kScaling) / sizeof(kScaling[0]); j++)
@@ -210,9 +210,9 @@ static void check_gs_mode_numbering(void)
 		entry.gsHWFixes = &fix;
 		entry.nGSHWFixes = 1;
 		gs.NativeScalingSet = true;
-		gs.UserHacks_NativeScaling = NativeScaling_Off;
+		gs.UserHacks_NativeScaling = GS_NATIVE_SCALING_OFF;
 		GameDatabase_ApplyGSHardwareFixes(&entry, gs);
-		expect(gs.UserHacks_NativeScaling == NativeScaling_Off, "nativeScaling over a user option", 2);
+		expect(gs.UserHacks_NativeScaling == GS_NATIVE_SCALING_OFF, "nativeScaling over a user option", 2);
 	}
 
 	/* Out of range: ignored, and logged as a warning (counted by main). */
