@@ -664,7 +664,6 @@ struct Pcsx2Config
 
 	protected:
 		static void LoadIPHelper(u8* field, const std::string& setting);
-		static std::string SaveIPHelper(u8* field);
 	};
 
 	// ------------------------------------------------------------------------
