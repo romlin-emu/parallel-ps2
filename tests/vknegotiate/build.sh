@@ -702,6 +702,12 @@ done
 echo "$ALLOC_CEILINGS" | while read r c most; do
 	[ -n "$r" ] || continue
 	renderer=$(echo "$r" | tr _ ' ')
+	# Counting backtraces every allocation in the process, the driver's
+	# shader compiles included: on a cold shader cache the counted run
+	# outlasts its timeout, so an uncounted run fills the cache first.
+	rm -rf "$SCRATCH/alloc" && mkdir -p "$SCRATCH/alloc"
+	VN_FRAMES=60 VN_IDLE_BIOS=1 LRPS2_BIOS="$SCRATCH/$c.bin" VN_RENDERER="$renderer" \
+		timeout 600 "$DIR/vknegotiate" "$CORE" "$SCRATCH/alloc" v2 > /dev/null 2>&1 || true
 	rm -rf "$SCRATCH/alloc" && mkdir -p "$SCRATCH/alloc"
 	VN_COUNT_ALLOCS=1 VN_FRAMES=60 VN_IDLE_BIOS=1 LRPS2_BIOS="$SCRATCH/$c.bin" VN_RENDERER="$renderer" \
 		timeout 600 "$DIR/vknegotiate" "$CORE" "$SCRATCH/alloc" v2 > "$SCRATCH/alloc.log" 2>&1 || true
