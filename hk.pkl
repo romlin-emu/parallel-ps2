@@ -1,0 +1,41 @@
+amends "package://github.com/jdx/hk/releases/download/v2.12.0/hk@2.12.0#/Config.pkl"
+import "package://github.com/jdx/hk/releases/download/v2.12.0/hk@2.12.0#/Builtins.pkl"
+
+// Detached fork with a large legacy tree: only cheap hygiene, never whole-tree
+// formatting. 3rdparty and submodules are excluded everywhere.
+local linters = new Mapping<String, Step> {
+  ["check-merge-conflict"] = (Builtins.check_merge_conflict) {
+    exclude = List("3rdparty/")
+  }
+  ["detect-private-key"] = (Builtins.detect_private_key) {
+    exclude = List("3rdparty/")
+  }
+  ["shellcheck"] = new Step {
+    glob = List("tests/*.sh")
+    exclude = List("tests/*/**")
+    // SC1007: `CDPATH= cd` is the intended idiom.
+    check = "shellcheck --exclude=SC1007 {{files}}"
+  }
+}
+
+hooks {
+  ["pre-commit"] {
+    fix = true
+    stash = "git"
+    steps = linters
+  }
+  ["commit-msg"] {
+    steps {
+      ["conventional-commit"] {
+        check = "hk util check-conventional-commit {{commit_msg_file}}"
+      }
+    }
+  }
+  ["check"] {
+    steps = linters
+  }
+  ["fix"] {
+    fix = true
+    steps = linters
+  }
+}
